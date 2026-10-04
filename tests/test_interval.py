@@ -16,8 +16,10 @@ from __future__ import annotations
 
 import re
 import sys
+import os
 import tempfile
 import unittest
+from unittest import mock
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -53,6 +55,25 @@ class SettingsStoreCase(unittest.TestCase):
 
     def tearDown(self):
         self.tmp.cleanup()
+
+
+class DurableDiskCase(SettingsStoreCase):
+    """A file store whose disk really does survive the run.
+
+    `interval_mode_is_safe` refuses a plain file store whenever `CI` is set,
+    which is correct for a GitHub runner and wrong for a temp directory that
+    outlives the call. Rather than weakening the guard, these tests declare the
+    exception they mean, so the guard stays honest on both sides.
+
+    Without this the suite passed on a laptop and failed on every CI run -- a
+    real bug the first push to GitHub caught.
+    """
+
+    def setUp(self):
+        super().setUp()
+        patcher = mock.patch.dict(os.environ, {"REMINDER_ALLOW_FILE_INTERVAL": "1"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
 
 class SlotTest(unittest.TestCase):
@@ -118,7 +139,7 @@ class SettingsFileTest(SettingsStoreCase):
         self.assertEqual(self.store.load().interval_minutes, 0)
 
 
-class IntervalHeartbeatTest(SettingsStoreCase):
+class IntervalHeartbeatTest(DurableDiskCase):
     """cmd_interval is the thing the cron calls, over and over."""
 
     def heartbeat(self, telegram=None, now=NOW, store=None):

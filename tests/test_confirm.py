@@ -11,9 +11,11 @@ future reader what breaks if it were deleted.
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -71,6 +73,22 @@ class ConfirmCase(unittest.TestCase):
         self.settings = FileSettings(root / "settings.json")
         self.bot = Bot()
         self.settings.save(Settings(interval_minutes=15))
+
+
+class DurableDiskCase(ConfirmCase):
+    """These tests drive `cmd_interval` against a temp file that outlives the call.
+
+    `interval_mode_is_safe` refuses a plain file store whenever `CI` is set, which
+    is right for a GitHub runner and wrong here. The tests declare the exception
+    they mean rather than the guard being loosened: it has to stay strict on a
+    real runner or the spam protection is gone.
+    """
+
+    def setUp(self):
+        super().setUp()
+        patcher = mock.patch.dict(os.environ, {"REMINDER_ALLOW_FILE_INTERVAL": "1"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
 
 class NudgeTimingTest(ConfirmCase):
@@ -203,7 +221,7 @@ class ButtonOwnershipTest(unittest.TestCase):
                 self.assertFalse(resolve(action))
 
 
-class StoppedTimerTest(ConfirmCase):
+class StoppedTimerTest(DurableDiskCase):
     def test_f14_saved_stops_the_next_period_too_not_just_the_nudge(self):
         """Reproduced while building this: clearing the question alone left
         interval_minutes at 15, so the next period fired as if nothing happened.
@@ -235,7 +253,7 @@ class StoppedTimerTest(ConfirmCase):
         self.assertTrue(self.settings.load().stopped)
 
 
-class OpenQuestionBlocksNewRemindersTest(ConfirmCase):
+class OpenQuestionBlocksNewRemindersTest(DurableDiskCase):
     def test_f18_an_unanswered_question_stops_the_next_period_too(self):
         """The user was asked and has not answered. Another reminder on top of
         that is nagging twice over."""
