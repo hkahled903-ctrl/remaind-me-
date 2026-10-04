@@ -245,6 +245,30 @@ Widen the cron if that matters -- and then the smallest offered reminder with it
 
 ---
 
+## Deploying the Connect page
+
+The page is served by `reminder --serve` on any host with a real process
+(Render, Fly.io, Railway, Cloud Run). It reads `PORT`, so no configuration is
+needed for the port.
+
+**Vercel is different.** Vercel runs a WSGI function once per request instead of
+keeping a server alive, so `api/index.py` re-exposes the same `ConnectApp` behind
+the WSGI interface. The routing, the secret check and the button-ownership check
+are all still the ones in `reminder/webapp.py` -- the adapter only translates the
+request. `vercel.json` points at it.
+
+Two consequences of serverless, stated plainly:
+
+* nonces live in memory and are lost on a cold start. The status handler already
+  treats an unknown nonce as "check the store", so the Connect flow degrades to
+  "you look connected" instead of breaking.
+* `binding.json` and `settings.json` are per-invocation unless a durable store is
+  configured. Set Upstash -- which interval and nudge mode require anyway -- and
+  the function is stateless and correct.
+
+`tests/test_wsgi.py` starts a real WSGI server and calls every route, so a broken
+deployment fails CI rather than showing a 404 page.
+
 ## Let it run by itself
 
 Push the folder to a GitHub repository (private is fine), then:
