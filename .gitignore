@@ -1,0 +1,12 @@
+# Files created at run time -- do not commit them
+reminder.log
+state.json
+binding.json
+settings.json
+confirm.json
+__pycache__/
+*.pyc
+
+# Local secrets -- never commit real credentials
+.env
+.env.local

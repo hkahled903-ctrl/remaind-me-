@@ -1,0 +1,39 @@
+name: Reminder nudge
+
+on:
+  schedule:
+    # Five minutes is the finest schedule GitHub accepts. `reminder --nudge`
+    # decides whether a particular beat needs to ask again; most beats send
+    # nothing at all, which is what makes a stopped timer genuinely silent.
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A nudge that is already in flight must finish, and a stale one must not stack
+# behind it -- two nudges at once is the one thing this feature must not do.
+concurrency:
+  group: reminder-nudge
+  cancel-in-progress: true
+
+jobs:
+  nudge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up Python
+        uses: actions/setup-python@0b93645e1fea7318ecaed2b359559ac225c90a2b # v5
+        with:
+          python-version: "3.12"
+
+      - name: Ask again if the last reminder went unanswered
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
+          UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
+        run: python -m reminder --nudge

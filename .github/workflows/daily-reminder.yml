@@ -1,0 +1,61 @@
+name: Daily report reminder
+
+on:
+  schedule:
+    # UTC, not local time. Egypt has been UTC+2 year-round since 2023, so this is
+    # 09:00 Cairo. Keep this in step with reminder_time in config.json -- the
+    # suite fails the build if they disagree (tests/test_pipeline.py).
+    - cron: "0 7 * * *"
+  workflow_dispatch: # run it by hand from this page at any time
+
+# Least privilege: this job only needs to read the repository to check it out.
+permissions:
+  contents: read
+
+# Never run two reminders at once, but do not cancel one that is mid-send.
+concurrency:
+  group: daily-report-reminder
+  cancel-in-progress: false
+
+jobs:
+  remind:
+    runs-on: ubuntu-latest
+    # A reminder that hangs must not hold a runner. The HTTP timeout is 20s.
+    timeout-minutes: 5
+
+    steps:
+      # Pinned to commit SHAs, not tags: a tag like @v4 can be moved to new code.
+      # Dependabot keeps these current; see README "Updating the pinned actions".
+      - name: Check out the repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      # Belt and braces: ubuntu ships tzdata, but zoneinfo silently falls back to
+      # UTC without it and the reminder would fire at the wrong hour.
+      - name: Install the timezone database
+        run: pip install tzdata
+
+      - name: Fail fast if the bot token is missing
+        env:
+          TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "::error::TELEGRAM_BOT_TOKEN is not set in this repository"
+            echo "Add it under Settings > Secrets and variables > Actions."
+            exit 1
+          fi
+
+      - name: Send the reminder
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          # The connected chat lives on an Upstash store on the host that serves
+          # the Connect page. Without these the runner falls back to a local
+          # binding.json, which it writes and then throws away -- so a chat
+          # connected through the web page would silently stop being reachable.
+          # Unset is safe: it degrades to config.json / the local file.
+          UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
+          UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
+        run: python -m reminder --scheduled

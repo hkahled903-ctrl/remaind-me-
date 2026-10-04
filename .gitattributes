@@ -1,0 +1,11 @@
+# Keep line endings as written.
+#
+# Without this, a Windows checkout normalises LF to CRLF in the working copy, and
+# the Linux runner then executes `run: python -m reminder` from a script with CRLF
+# endings -- which fails in ways that look nothing like a line-ending problem.
+* text=auto eol=lf
+
+# Binary, never touched.
+*.png binary
+*.jpg binary
+*.woff2 binary
