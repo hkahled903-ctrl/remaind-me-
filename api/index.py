@@ -140,8 +140,13 @@ def application(environ, start_response):
         method = environ.get("REQUEST_METHOD", "GET").upper()
         parsed = urllib.parse.urlparse(environ.get("PATH_INFO", "/"))
         query = urllib.parse.parse_qs(parsed.query)
+        # WSGI hands headers over as HTTP_X_FOO_BAR, so the header name has to be
+        # rebuilt before anything can look it up: strip the prefix and put the
+        # hyphens back. Lowercasing alone leaves underscores in the key, and a
+        # lookup by the real header name then finds nothing -- which is how every
+        # Telegram update came back 403 whatever the webhook secret was set to.
         headers = {
-            k.lower(): v
+            k[5:].replace("_", "-").lower(): v
             for k, v in environ.items()
             if k.startswith("HTTP_")
         }

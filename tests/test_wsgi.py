@@ -101,6 +101,27 @@ class WsgiAppTest(unittest.TestCase):
         _, _, body = self.get("/connect/interval")
         self.assertIsInstance(json.loads(body)["options"], list)
 
+    def test_w5b_the_webhook_accepts_the_correct_secret(self):
+        """The positive path, which had no coverage at all.
+
+        `test_w5` only proved a *wrong* secret is refused, and it passes whether
+        the header is read correctly or not -- so the deployed webhook could
+        reject every update, forever, with a green suite. This posts the secret
+        the app was actually configured with and insists on a 200.
+
+        The message is deliberately not a `/start`, so the request exercises the
+        header check and returns without writing the real `binding.json`.
+        """
+        status, data = self.post(
+            "/telegram/webhook",
+            json.dumps({"message": {"chat": {"id": 1}, "text": "hello"}}).encode(),
+            secret=os.environ["WEBHOOK_SECRET"],
+        )
+        self.assertEqual(
+            status, 200, "the correct secret was rejected -- the header never arrived"
+        )
+        self.assertTrue(data.get("ok"), data)
+
     def test_w5_the_webhook_refuses_a_bad_secret(self):
         status, data = self.post(
             "/telegram/webhook",
