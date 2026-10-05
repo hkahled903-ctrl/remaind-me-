@@ -1,0 +1,57 @@
+name: Register Telegram webhook (one-off)
+
+on:
+  workflow_dispatch: # manual only; never scheduled
+
+permissions:
+  contents: read
+
+concurrency:
+  group: register-webhook
+  cancel-in-progress: false
+
+jobs:
+  register:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      # Injects the whole dev environment, including TELEGRAM_BOT_TOKEN and
+      # WEBHOOK_SECRET. Nothing is echoed; GitHub masks the token in logs.
+      - name: Fetch secrets from Infisical
+        uses: Infisical/secrets-action@d2e351f16c6ca20d17c85e6c992e04bdeb64e87d # v1.0.18
+        with:
+          method: "universal"
+          client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
+          client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+          project-slug: ${{ vars.INFISICAL_PROJECT_SLUG }}
+          env-slug: "dev"
+
+      # Reuses the app's own register_webhook -- the same call --serve makes.
+      # It sends allowed_updates ["message"], unchanged, and prints only the URL.
+      - name: Register the webhook
+        run: |
+          python -c "
+          import os
+          from reminder.transport import Telegram
+          from reminder.webapp import register_webhook
+          register_webhook('https://remaind-me-xi.vercel.app', os.environ['WEBHOOK_SECRET'], Telegram(os.environ['TELEGRAM_BOT_TOKEN']))"
+
+      # Confirm in the same run. getWebhookInfo never returns secret_token.
+      - name: Confirm
+        run: |
+          python -c "
+          import os
+          from reminder.transport import Telegram
+          r = Telegram(os.environ['TELEGRAM_BOT_TOKEN']).call('getWebhookInfo', {}).get('result', {})
+          print('url            :', r.get('url') or '(NOT REGISTERED)')
+          print('allowed_updates:', r.get('allowed_updates'))
+          print('pending updates:', r.get('pending_update_count'))
+          print('last_error     :', r.get('last_error_message'))"
