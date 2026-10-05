@@ -18,7 +18,7 @@ from .confirm import (
     nudge_text,
     reminder_keyboard,
 )
-from .logs import log
+from .logs import diagnostic, diagnostic_exception, log
 from .policy import next_occurrence, should_send, slot_for
 from .settings import (
     Settings,
@@ -223,7 +223,9 @@ def stop_timer(cycle_store, client: Telegram | None = None, chat_id: str = "") -
     return 0
 
 
-def serve_due(client: Telegram, store, message: str, now=None) -> int:
+def serve_due(
+    client: Telegram, store, message: str, now=None, diagnostic_id: str | None = None
+) -> int:
     """One heartbeat: message every chat whose next send time has arrived.
 
     Both crons call this. There is one engine, not two, so the "first reminder"
@@ -245,21 +247,119 @@ def serve_due(client: Telegram, store, message: str, now=None) -> int:
     """
     moment = now if now is not None else utcnow()
     sent = 0
-    for cycle in serve_cycles(store, moment):
-        if not store.claim(cycle.chat_id, cycle.cycle):
+    for cycle in serve_cycles(store, moment, diagnostic_id=diagnostic_id):
+        if diagnostic_id:
+            diagnostic(
+                "CLAIM_ATTEMPTED",
+                diagnostic_id,
+                chat_id=cycle.chat_id,
+                cycle=cycle.cycle,
+            )
+        try:
+            claimed = store.claim(cycle.chat_id, cycle.cycle)
+        except Exception as exc:
+            if diagnostic_id:
+                diagnostic_exception(
+                    "CLAIM_ERROR",
+                    diagnostic_id,
+                    exc,
+                    redactions=(
+                        getattr(store, "_url", ""),
+                        getattr(store, "_token", ""),
+                    ),
+                    stage="CLAIM",
+                    chat_id=cycle.chat_id,
+                    cycle=cycle.cycle,
+                )
+            raise
+        if diagnostic_id:
+            diagnostic(
+                "CLAIM_RESULT",
+                diagnostic_id,
+                chat_id=cycle.chat_id,
+                cycle=cycle.cycle,
+                claimed=claimed,
+            )
+        if not claimed:
             log(f"chat {cycle.chat_id}: another worker owns this beat; skipping.")
             continue
         first = not cycle.pending
         text = message if first else nudge_text(cycle.nudges + 1)
-        store.save(mark_sent(cycle, moment))
+        updated_cycle = mark_sent(cycle, moment)
         try:
-            client.send_message(cycle.chat_id, text, reply_markup=reminder_keyboard())
-        except Exception:
+            store.save(updated_cycle)
+        except Exception as exc:
+            if diagnostic_id:
+                diagnostic_exception(
+                    "STATE_UPDATE_ERROR",
+                    diagnostic_id,
+                    exc,
+                    redactions=(
+                        getattr(store, "_url", ""),
+                        getattr(store, "_token", ""),
+                    ),
+                    stage="STATE_UPDATE",
+                    chat_id=cycle.chat_id,
+                )
+            raise
+        if diagnostic_id:
+            diagnostic(
+                "STATE_UPDATE",
+                diagnostic_id,
+                chat_id=cycle.chat_id,
+                status="saved_before_send",
+                marked_sent=updated_cycle.pending,
+                stopped=updated_cycle.stopped,
+                asked_at=updated_cycle.asked_at,
+                last_sent_at=updated_cycle.last_sent_at,
+            )
+            diagnostic(
+                "TELEGRAM_SEND_ATTEMPTED",
+                diagnostic_id,
+                chat_id=cycle.chat_id,
+                message_kind="reminder" if first else "nudge",
+            )
+        try:
+            response = client.send_message(
+                cycle.chat_id, text, reply_markup=reminder_keyboard()
+            )
+        except Exception as exc:
             # The record already says this beat was served. Releasing the claim
             # would let a retry send it again; leaving it is what makes this
             # at-most-once.
             log(f"chat {cycle.chat_id}: Telegram rejected the message; this beat is lost.")
+            if diagnostic_id:
+                diagnostic_exception(
+                    "TELEGRAM_SEND_ERROR",
+                    diagnostic_id,
+                    exc,
+                    redactions=(getattr(client, "_token", ""),),
+                    stage="TELEGRAM_SEND",
+                    chat_id=cycle.chat_id,
+                    state_marked_sent=True,
+                )
             raise
+        if diagnostic_id:
+            result = response.get("result") if isinstance(response, dict) else None
+            diagnostic(
+                "TELEGRAM_SEND_RESULT",
+                diagnostic_id,
+                chat_id=cycle.chat_id,
+                returned=True,
+                telegram_ok=response.get("ok") if isinstance(response, dict) else None,
+                message_id=result.get("message_id") if isinstance(result, dict) else None,
+            )
+            diagnostic(
+                "STATE_AFTER_SEND",
+                diagnostic_id,
+                chat_id=cycle.chat_id,
+                state_transition="none",
+                persisted_before_send=True,
+                marked_sent=updated_cycle.pending,
+                stopped=updated_cycle.stopped,
+                asked_at=updated_cycle.asked_at,
+                last_sent_at=updated_cycle.last_sent_at,
+            )
         log(
             f"{'reminder' if first else f'nudge {cycle.nudges + 1}'} sent to "
             f"chat {cycle.chat_id}"
@@ -267,13 +367,33 @@ def serve_due(client: Telegram, store, message: str, now=None) -> int:
         sent += 1
     if not sent:
         log("nothing was due on this beat.")
+    if diagnostic_id:
+        diagnostic(
+            "SERVE_DUE_COMPLETE",
+            diagnostic_id,
+            serve_due_return_value=sent,
+        )
     return sent
 
 
-def cmd_interval(config: dict, tz, client: Telegram, store, now=None, **kwargs) -> int:
+def cmd_interval(
+    config: dict,
+    tz,
+    client: Telegram,
+    store,
+    now=None,
+    diagnostic_id: str | None = None,
+    **kwargs,
+) -> int:
     # Exit code, not a message count: a quiet beat must be 0 so the cron is not
     # red every five minutes. `serve_due` raises if Telegram refuses.
-    serve_due(client, store, config.get("message", ""), now)
+    serve_due(
+        client,
+        store,
+        config.get("message", ""),
+        now,
+        diagnostic_id=diagnostic_id,
+    )
     return 0
 
 

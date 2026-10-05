@@ -51,7 +51,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable, Protocol
 
-from .logs import log
+from .logs import diagnostic, diagnostic_exception, log
 from .policy import ALLOWED_INTERVALS
 
 # The interval between follow-up asks. Fixed by the product, never a user choice.
@@ -250,8 +250,9 @@ CHATS_KEY = "reminder:chats"
 
 class CycleStore(Protocol):
     def load(self, chat_id: str) -> Cycle: ...
+    def load_with_presence(self, chat_id: str) -> tuple[Cycle, bool]: ...
     def save(self, cycle: Cycle) -> None: ...
-    def known_chats(self) -> list[str]: ...
+    def known_chats(self, diagnostic_id: str | None = None) -> list[str]: ...
     def remember(self, chat_id: str) -> None: ...
     def claim(self, chat_id: str, cycle: int) -> bool: ...
     def release(self, chat_id: str) -> None: ...
@@ -294,14 +295,18 @@ class FileCycleStore:
             log(f"could not write {self._path.name}: {exc}")
 
     def load(self, chat_id: str) -> Cycle:
-        return _from_raw(chat_id, self._read().get(chat_id))
+        return self.load_with_presence(chat_id)[0]
+
+    def load_with_presence(self, chat_id: str) -> tuple[Cycle, bool]:
+        records = self._read()
+        return _from_raw(chat_id, records.get(chat_id)), chat_id in records
 
     def save(self, cycle: Cycle) -> None:
         data = self._read()
         data[cycle.chat_id] = asdict(cycle)
         self._write(data)
 
-    def known_chats(self) -> list[str]:
+    def known_chats(self, diagnostic_id: str | None = None) -> list[str]:
         return sorted(self._read())
 
     def remember(self, chat_id: str) -> None:
@@ -358,22 +363,35 @@ class UpstashCycleStore:
         return body.get("result") if isinstance(body, dict) else None
 
     def load(self, chat_id: str) -> Cycle:
+        return self.load_with_presence(chat_id)[0]
+
+    def load_with_presence(self, chat_id: str) -> tuple[Cycle, bool]:
         raw = self.command("GET", _key(chat_id))
         if not raw:
-            return Cycle(chat_id=chat_id)
+            return Cycle(chat_id=chat_id), False
         try:
-            return _from_raw(chat_id, json.loads(raw))
+            return _from_raw(chat_id, json.loads(raw)), True
         except (TypeError, ValueError):
             log("WARNING: timer store holds unreadable data; treating it as idle.")
-            return Cycle(chat_id=chat_id)
+            return Cycle(chat_id=chat_id), True
 
     def save(self, cycle: Cycle) -> None:
         self.command("SET", _key(cycle.chat_id), json.dumps(asdict(cycle)))
 
-    def known_chats(self) -> list[str]:
+    def known_chats(self, diagnostic_id: str | None = None) -> list[str]:
         try:
             members = self.command("SMEMBERS", CHATS_KEY) or []
-        except RuntimeError:
+        except RuntimeError as exc:
+            if diagnostic_id:
+                diagnostic_exception(
+                    "DISCOVERY_ERROR",
+                    diagnostic_id,
+                    exc,
+                    redactions=(self._url, self._token),
+                    stage="DISCOVERY",
+                    operation="SMEMBERS",
+                    behavior="returned_empty_list",
+                )
             return []
         return sorted(str(m) for m in members if str(m))
 
@@ -402,16 +420,94 @@ def cycle_store_from_env(env: dict | None = None) -> CycleStore:
     return FileCycleStore()
 
 
-def serve_cycles(store: CycleStore, now: datetime, chat_ids: Iterable[str] | None = None):
+def serve_cycles(
+    store: CycleStore,
+    now: datetime,
+    chat_ids: Iterable[str] | None = None,
+    diagnostic_id: str | None = None,
+):
     """Yield every cycle this beat owes a message for, in chat order.
 
     Pure selection: it says which chats are due, never that a message went out.
     The caller claims, sends and records, so this stays testable on its own.
     """
-    chats = list(chat_ids) if chat_ids is not None else store.known_chats()
+    try:
+        if chat_ids is not None:
+            chats = list(chat_ids)
+        elif isinstance(store, UpstashCycleStore):
+            chats = store.known_chats(diagnostic_id)
+        else:
+            chats = store.known_chats()
+    except Exception as exc:
+        if diagnostic_id:
+            diagnostic_exception(
+                "DISCOVERY_ERROR",
+                diagnostic_id,
+                exc,
+                redactions=(
+                    getattr(store, "_url", ""),
+                    getattr(store, "_token", ""),
+                ),
+                stage="DISCOVERY",
+            )
+        raise
+    if diagnostic_id:
+        diagnostic(
+            "DISCOVERY",
+            diagnostic_id,
+            status="completed",
+            server_time=_iso(now),
+            chat_count=len(chats),
+            chat_ids=sorted(chats),
+        )
     due = []
     for chat_id in sorted(chats):
-        cycle = store.load(chat_id)
-        if first_reminder_due(cycle, now) or nudge_due(cycle, now):
+        try:
+            load_with_presence = getattr(store, "load_with_presence", None)
+            if load_with_presence is None:
+                cycle, cycle_exists = store.load(chat_id), None
+            else:
+                cycle, cycle_exists = load_with_presence(chat_id)
+        except Exception as exc:
+            if diagnostic_id:
+                diagnostic_exception(
+                    "CYCLE_LOOKUP_ERROR",
+                    diagnostic_id,
+                    exc,
+                    redactions=(
+                        getattr(store, "_url", ""),
+                        getattr(store, "_token", ""),
+                    ),
+                    stage="CYCLE_LOOKUP",
+                    chat_id=chat_id,
+                )
+            raise
+        first_due = first_reminder_due(cycle, now)
+        followup_due = nudge_due(cycle, now)
+        is_due = first_due or followup_due
+        if diagnostic_id:
+            diagnostic(
+                "CYCLE_LOOKUP",
+                diagnostic_id,
+                chat_id=chat_id,
+                cycle_exists=cycle_exists,
+                interval_minutes=cycle.interval_minutes,
+                activated_at=cycle.activated_at,
+                due_at=_iso(cycle.due_at) if cycle.due_at else None,
+                server_time=_iso(now),
+                seconds_until=cycle.seconds_until_next_send(now),
+                running=cycle.is_running,
+                stopped=cycle.stopped,
+                pending=cycle.pending,
+            )
+            diagnostic(
+                "DUE_CHECK",
+                diagnostic_id,
+                chat_id=chat_id,
+                first_reminder_due=first_due,
+                nudge_due=followup_due,
+                due=is_due,
+            )
+        if is_due:
             due.append(cycle)
     return due

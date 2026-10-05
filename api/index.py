@@ -30,6 +30,7 @@ from __future__ import annotations
 import hmac
 import json
 import os
+import uuid
 import urllib.parse
 from datetime import datetime
 
@@ -38,6 +39,7 @@ from reminder.binding import store_from_env
 from reminder.commands import bot_username
 from reminder.confirm import confirm_store_from_env
 from reminder.config import load_config, resolve_timezone
+from reminder.logs import diagnostic, diagnostic_exception
 from reminder.settings import settings_store_from_env
 from reminder.timer import cycle_store_from_env
 from reminder.transport import Telegram
@@ -116,7 +118,46 @@ def _dispatch(method, path, query, headers, body) -> tuple[int, object, str]:
             authorization = headers.get("authorization", "")
             if not hmac.compare_digest(authorization, f"Bearer {cron_secret}"):
                 return 403, {"error": "forbidden"}, "application/json"
-            cmd_interval(_CONFIG, _TZ, _CLIENT, _CYCLES)
+            diagnostic_id = (
+                uuid.uuid4().hex
+                if headers.get("x-interval-diagnostic") == "1"
+                else None
+            )
+            if diagnostic_id:
+                diagnostic(
+                    "ENDPOINT_INVOKED",
+                    diagnostic_id,
+                    method="GET",
+                    path="/internal/interval-cron",
+                )
+            try:
+                cmd_interval(
+                    _CONFIG,
+                    _TZ,
+                    _CLIENT,
+                    _CYCLES,
+                    diagnostic_id=diagnostic_id,
+                )
+            except Exception as exc:
+                if diagnostic_id:
+                    diagnostic_exception(
+                        "ENDPOINT_FAILED",
+                        diagnostic_id,
+                        exc,
+                        redactions=(
+                            os.environ.get("UPSTASH_REDIS_REST_URL", ""),
+                            os.environ.get("UPSTASH_REDIS_REST_TOKEN", ""),
+                            os.environ.get("TELEGRAM_BOT_TOKEN", ""),
+                            cron_secret,
+                            authorization,
+                        ),
+                        stage="INTERVAL_WORKER",
+                    )
+                else:
+                    raise
+                return 500, {"error": "internal error"}, "application/json"
+            if diagnostic_id:
+                diagnostic("ENDPOINT_COMPLETE", diagnostic_id, status=200)
             return 200, {"ok": True}, "application/json"
         if path in ("/", "/index.html"):
             status, content_type, page = APP.page()

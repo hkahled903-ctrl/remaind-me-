@@ -223,6 +223,86 @@ class IntervalHeartbeatTest(unittest.TestCase):
         self.assertTrue(client.sent[0].startswith(f"{self.chat}:"))
 
 
+class IntervalDiagnosticsTest(unittest.TestCase):
+    def test_diagnostic_events_trace_the_complete_due_send_pipeline(self):
+        import json
+
+        from reminder.commands import serve_due
+        from reminder.timer import Cycle, activate
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = FileCycleStore(Path(tmp) / "timer.json")
+            due_at = NOW + timedelta(minutes=15)
+            cycle = activate(Cycle(chat_id="555"), 15, NOW)
+            store.save(cycle)
+
+            class Client:
+                def send_message(self, chat_id, text, reply_markup=None):
+                    return {"ok": True, "result": {"message_id": 42}}
+
+            with mock.patch("reminder.logs.log") as log_line:
+                sent = serve_due(
+                    Client(),
+                    store,
+                    CONFIG["message"],
+                    now=due_at,
+                    diagnostic_id="test-invocation",
+                )
+
+        events = [
+            json.loads(call.args[0].split("INTERVAL_DIAGNOSTIC ", 1)[1])
+            for call in log_line.call_args_list
+            if call.args[0].startswith("INTERVAL_DIAGNOSTIC ")
+        ]
+        names = [event["event"] for event in events]
+        self.assertEqual(sent, 1)
+        self.assertEqual(
+            names,
+            [
+                "DISCOVERY",
+                "CYCLE_LOOKUP",
+                "DUE_CHECK",
+                "CLAIM_ATTEMPTED",
+                "CLAIM_RESULT",
+                "STATE_UPDATE",
+                "TELEGRAM_SEND_ATTEMPTED",
+                "TELEGRAM_SEND_RESULT",
+                "STATE_AFTER_SEND",
+                "SERVE_DUE_COMPLETE",
+            ],
+        )
+        by_name = {event["event"]: event for event in events}
+        self.assertEqual(by_name["DISCOVERY"]["chat_ids"], ["555"])
+        self.assertTrue(by_name["CYCLE_LOOKUP"]["cycle_exists"])
+        self.assertEqual(by_name["CYCLE_LOOKUP"]["interval_minutes"], 15)
+        self.assertEqual(by_name["CYCLE_LOOKUP"]["due_at"], cycle.due_at.isoformat())
+        self.assertTrue(by_name["DUE_CHECK"]["due"])
+        self.assertTrue(by_name["CLAIM_RESULT"]["claimed"])
+        self.assertTrue(by_name["TELEGRAM_SEND_RESULT"]["telegram_ok"])
+        self.assertEqual(by_name["TELEGRAM_SEND_RESULT"]["message_id"], 42)
+        self.assertTrue(by_name["STATE_AFTER_SEND"]["marked_sent"])
+        self.assertFalse(by_name["STATE_AFTER_SEND"]["stopped"])
+        self.assertEqual(by_name["SERVE_DUE_COMPLETE"]["serve_due_return_value"], 1)
+
+    def test_redis_discovery_failure_is_logged_without_changing_empty_result(self):
+        from reminder.timer import UpstashCycleStore
+
+        secret = "diagnostic-test-redis-token"
+        store = UpstashCycleStore("https://redis.example", secret)
+        with mock.patch.object(
+            store, "command", side_effect=RuntimeError(f"failed with {secret}")
+        ):
+            with mock.patch("reminder.logs.log") as log_line:
+                self.assertEqual(store.known_chats("test-invocation"), [])
+
+        logged = "\n".join(call.args[0] for call in log_line.call_args_list)
+        self.assertIn('"event": "DISCOVERY_ERROR"', logged)
+        self.assertIn('"behavior": "returned_empty_list"', logged)
+        self.assertIn('"exception_type": "RuntimeError"', logged)
+        self.assertIn('"traceback":', logged)
+        self.assertNotIn(secret, logged)
+
+
 class ServeStartupTest(unittest.TestCase):
     """`--serve` blocks forever once it starts, so the only safe thing to assert
     is that it refuses *before* that point. This caught a real crash: the server

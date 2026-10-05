@@ -60,10 +60,12 @@ class WsgiAppTest(unittest.TestCase):
         cls.server.server_close()
         cls.thread.join(timeout=5)
 
-    def get(self, path: str, authorization: str | None = None):
+    def get(self, path: str, authorization: str | None = None, diagnostic: bool = False):
         request = urllib.request.Request(BASE + path)
         if authorization is not None:
             request.add_header("Authorization", authorization)
+        if diagnostic:
+            request.add_header("X-Interval-Diagnostic", "1")
         try:
             with urllib.request.urlopen(request, timeout=10) as response:
                 return response.status, response.headers.get("Content-Type", ""), response.read()
@@ -207,13 +209,16 @@ class WsgiAppTest(unittest.TestCase):
             with mock.patch.object(index, "cmd_interval", return_value=0) as run_worker:
                 status, _, body = self.get(
                     "/internal/interval-cron",
+                    diagnostic=True,
                     authorization="Bearer test-cron-secret",
                 )
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body), {"ok": True})
-        run_worker.assert_called_once_with(
-            index._CONFIG, index._TZ, index._CLIENT, index._CYCLES
-        )
+        run_worker.assert_called_once()
+        args, kwargs = run_worker.call_args
+        self.assertEqual(args, (index._CONFIG, index._TZ, index._CLIENT, index._CYCLES))
+        self.assertIn("diagnostic_id", kwargs)
+        self.assertTrue(kwargs["diagnostic_id"])
 
 
 if __name__ == "__main__":
