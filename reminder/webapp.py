@@ -225,7 +225,10 @@ class ConnectApp:
             "seconds_until": cycle.seconds_until_next_send(now) if cycle else 0,
             "stopped": bool(cycle.stopped) if cycle else True,
             "chat_id": chat_id,
-            "options": list(ALLOWED_INTERVALS),
+            "options": [
+                {"value": value, "label": INTERVAL_LABELS[value]}
+                for value in ALLOWED_INTERVALS
+            ],
         }
 
     def _activate_cycle(self, minutes: int, requested: str = "") -> tuple[int, dict]:

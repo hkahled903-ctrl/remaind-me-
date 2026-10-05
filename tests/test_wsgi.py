@@ -99,7 +99,17 @@ class WsgiAppTest(unittest.TestCase):
         """The page iterates these with `for...of`, which throws on a JSON object.
         This was a real bug: the picker rendered nothing."""
         _, _, body = self.get("/connect/interval")
-        self.assertIsInstance(json.loads(body)["options"], list)
+        options = json.loads(body)["options"]
+        self.assertEqual(
+            options,
+            [
+                {"value": 15, "label": "15 min"},
+                {"value": 30, "label": "30 min"},
+                {"value": 60, "label": "1 hour"},
+                {"value": 180, "label": "3 hours"},
+            ],
+            "cycle-backed schedule options must match the picker's {value, label} shape",
+        )
 
     def test_w5b_the_webhook_accepts_the_correct_secret(self):
         """The positive path, which had no coverage at all.
