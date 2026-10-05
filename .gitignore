@@ -10,3 +10,6 @@ __pycache__/
 # Local secrets -- never commit real credentials
 .env
 .env.local
+# A backup of .env holds every secret in it just as plainly as .env does.
+.env.backup
+.env.*.backup

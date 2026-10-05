@@ -46,6 +46,8 @@ runs without it, just with fewer structural checks.
 
 Run everything as `python -m reminder` from this folder.
 
+That command reads the process environment and nothing else. To fill that environment from Infisical rather than from your shell, put `infisical run --env=dev --` in front of it -- see [Secrets live in Infisical](#secrets-live-in-infisical).
+
 | Command | What it does | Exit |
 | --- | --- | --- |
 | `--dry-run` | Print the message and whether right now is the window | 0 |
@@ -64,6 +66,89 @@ Run everything as `python -m reminder` from this folder.
 
 ---
 
+## Secrets live in Infisical
+
+Nothing in this repository holds a credential. Secrets are stored in
+[Infisical](https://infisical.com) and injected into the process environment at
+run time, so the code reads `os.environ` exactly as it always did. There is no
+`.env` to keep in step with anything.
+
+Set it up once:
+
+1. Create a project named after the service. Every project starts with
+   `Development`, `Staging` and `Production` environments, and you can **drag
+   your existing `.env` file onto the Secrets Overview page** to import every key
+   at once.
+2. Install the CLI: Windows `winget install infisical` (or `scoop install
+   infisical`), macOS `brew install infisical/get-cli/infisical`.
+3. `infisical login`. On a machine with no browser -- WSL 2, Codespaces, a
+   remote SSH session -- run `infisical login -i` instead.
+4. `infisical init`, and pick the project. That writes `.infisical.json`, which
+   holds the project id and no sensitive values, so it is safe to commit.
+
+Then prefix any command with the wrapper and stop thinking about where the
+values come from:
+
+```bash
+infisical run --env=dev -- python -m reminder --once
+```
+
+`--env=dev` is the slug of the `Development` environment. The wrapper passes the
+rest of your environment through untouched and exits with the command's own
+exit code, so `--dry-run` still sends nothing and still returns `0`.
+
+Every key the code reads belongs in that one environment:
+
+| Key | Needed for |
+| --- | --- |
+| `TELEGRAM_BOT_TOKEN` | everything that sends |
+| `WEBHOOK_SECRET` | `--serve`; it refuses to start without one |
+| `PUBLIC_URL` | registering the webhook |
+| `BOT_USERNAME` | optional; one `getMe` call finds it |
+| `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN` | the durable store; required for interval mode |
+
+### Proving the values come from Infisical
+
+Print a length, never the value:
+
+```bash
+infisical run --env=dev -- python -c "import os; print(len(os.environ.get('TELEGRAM_BOT_TOKEN','')))"
+```
+
+Then prove nothing is coming off the disk any more:
+
+```bash
+mv .env .env.backup
+infisical run --env=dev -- python -m reminder --dry-run
+```
+
+If that still works, the secret came from Infisical. `.env.backup` is gitignored,
+but delete it once you are satisfied -- it holds every secret you just migrated.
+`.env.example` stays in the repository as the list of key names; it never holds a
+value.
+
+### In GitHub Actions
+
+CI never runs an interactive login. It uses a **machine identity** and
+[Universal Auth](https://infisical.com/docs/documentation/platform/identities/universal-auth):
+create the identity under `Access Control > Machine Identities`, give it a client
+secret, and add it to this project with a read role on the `dev` environment
+only. Then set, in the repository, under `Settings` -> `Secrets and variables` ->
+`Actions`:
+
+| | Where | Value |
+| --- | --- | --- |
+| `INFISICAL_CLIENT_ID` | secret | the identity's client id |
+| `INFISICAL_CLIENT_SECRET` | secret | the identity's client secret |
+| `INFISICAL_PROJECT_SLUG` | variable | the project slug, from the project's `Settings > General` |
+
+The three send workflows fetch the whole `dev` environment through the
+[Infisical Secrets Action](https://github.com/Infisical/secrets-action), pinned
+to a commit SHA like every other action in this repository. **No bot token and no
+Upstash credential is stored in GitHub**, so rotating one changes nothing you
+have to commit. The `CI` workflow deliberately fetches nothing: `--dry-run` has
+to stay runnable with no credentials at all.
+
 ## First run: 4 steps
 
 ### 1. Create a Telegram bot
@@ -75,11 +160,10 @@ username. It replies with a **token**.
 
 ### 2. Get your chat id
 
-Message the new bot anything (even `hi`). Then, in PowerShell or Command Prompt:
+Message the new bot anything (even `hi`). Then, from this folder:
 
-```powershell
-$env:TELEGRAM_BOT_TOKEN = "your_token"
-python -m reminder --whoami
+```bash
+infisical run --env=dev -- python -m reminder --whoami
 ```
 
 ```
@@ -126,8 +210,7 @@ JSON. You can skip it.
 ### The short way (nothing to host)
 
 ```bash
-$env:TELEGRAM_BOT_TOKEN = "your_token"
-python -m reminder --connect
+infisical run --env=dev -- python -m reminder --connect
 ```
 
 Prints a link. Open it, press Start, and the command waits for Telegram to confirm
@@ -141,11 +224,12 @@ empty.
 Telegram webhook behind it. No polling and nothing to keep awake: Telegram pushes
 the `/start` to `/telegram/webhook` when it happens.
 
+With `WEBHOOK_SECRET`, `PUBLIC_URL` and optionally `BOT_USERNAME` in the `dev`
+environment -- `WEBHOOK_SECRET` is 32+ random characters, and `--serve` refuses
+to start without it:
+
 ```bash
-$env:WEBHOOK_SECRET   = "<32+ random chars>"   # required; --serve refuses without it
-$env:PUBLIC_URL      = "https://your-host"     # where the page is reachable
-$env:BOT_USERNAME    = "my_report_bot"         # optional; discovered if omitted
-python -m reminder --serve
+infisical run --env=dev -- python -m reminder --serve
 ```
 
 | Variable | Needed for |
@@ -160,8 +244,9 @@ Deploy it anywhere that runs a Python process with a public HTTPS URL (Koyeb,
 Fly.io, Render, Cloud Run). Point `PUBLIC_URL` at the deployed URL and Telegram
 registers itself on boot.
 
-> **If you use the hosted page, add `UPSTASH_REDIS_REST_URL` and
-> `UPSTASH_REDIS_REST_TOKEN` to GitHub Actions secrets as well as to the host.**
+> **If you use the hosted page, put `UPSTASH_REDIS_REST_URL` and
+> `UPSTASH_REDIS_REST_TOKEN` in Infisical's `dev` environment**, which is what
+> both the host and the Actions workflows read.
 > The 09:00 send runs on an ephemeral runner: without them it falls back to a local
 > `binding.json` that it writes and throws away, and a chat connected through the
 > page would silently stop being reachable. (Leave them unset and the reminder
@@ -273,14 +358,17 @@ deployment fails CI rather than showing a 404 page.
 
 Push the folder to a GitHub repository (private is fine), then:
 
-`Settings` → `Secrets and variables` → `Actions` → `New repository secret`
+`Settings` → `Secrets and variables` → `Actions`
 
-| | |
+| Name | Where |
 | --- | --- |
-| Name | `TELEGRAM_BOT_TOKEN` |
-| Value | your token |
+| `INFISICAL_CLIENT_ID` | secret |
+| `INFISICAL_CLIENT_SECRET` | secret |
+| `INFISICAL_PROJECT_SLUG` | variable |
 
-That is the whole setup. Both workflows are ready:
+Those three belong to the machine identity, not to the bot -- see
+[In GitHub Actions](#in-github-actions) for how to create it. Both workflows are
+ready:
 
 - **`Daily report reminder`** fires at `0 7 * * *` UTC = **09:00 Cairo**.
 - **`CI`** runs the 76 tests on every push and pull request, so a broken change is
@@ -362,8 +450,7 @@ unit on Linux, or **Task Scheduler** on Windows.
 ## Security
 
 The script reads `config.json` and nothing else from your machine. It has no access
-to your reports. The token lives only in the environment, or in a GitHub Secret —
-never in the code, which `test_h2` and `test_p3` enforce.
+to your reports. The token lives in Infisical and reaches the process only as an environment variable — never in the code, and never in a GitHub Secret, which `test_h2` and `test_p3` enforce.
 
 To switch it off, delete the workflows. To invalidate the token, send `/revoke` to
 @BotFather.

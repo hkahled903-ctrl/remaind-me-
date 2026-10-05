@@ -38,22 +38,33 @@ jobs:
       - name: Install the timezone database
         run: pip install tzdata
 
-      - name: Fail fast if the bot token is missing
+      # The token now arrives from Infisical at run time, so the credential that
+      # must exist in GitHub is the machine identity, not the bot token itself.
+      - name: Fail fast if the Infisical identity is missing
         env:
-          TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CLIENT_ID: ${{ secrets.INFISICAL_CLIENT_ID }}
+          CLIENT_SECRET: ${{ secrets.INFISICAL_CLIENT_SECRET }}
         run: |
-          if [ -z "$TOKEN" ]; then
-            echo "::error::TELEGRAM_BOT_TOKEN is not set in this repository"
-            echo "Add it under Settings > Secrets and variables > Actions."
+          if [ -z "$CLIENT_ID" ] || [ -z "$CLIENT_SECRET" ]; then
+            echo "::error::the Infisical machine identity is not set in this repository"
+            echo "Add INFISICAL_CLIENT_ID and INFISICAL_CLIENT_SECRET under Settings > Secrets and variables > Actions."
             exit 1
           fi
 
-      # Without these two the runner keeps no memory of what it already sent, so
-      # every heartbeat would look like a fresh period and the reminder would
-      # repeat all day. Set both, or the heartbeat is not safe to run.
+      # Without UPSTASH_REDIS_REST_URL and _TOKEN the runner keeps no memory of
+      # what it already sent, so every heartbeat would look like a fresh period
+      # and the reminder would repeat all day. Both now come from Infisical, and
+      # the identity is scoped to this project and one environment.
+      - name: Fetch secrets from Infisical
+        uses: Infisical/secrets-action@d2e351f16c6ca20d17c85e6c992e04bdeb64e87d # v1.0.18
+        with:
+          method: "universal-auth"
+          client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
+          client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+          project-slug: ${{ vars.INFISICAL_PROJECT_SLUG }}
+          # The whole dev environment is injected, so the durable store
+          # arrives with everything else.
+          env-slug: "dev"
+
       - name: Run one heartbeat
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
-          UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
         run: python -m reminder --interval

@@ -38,24 +38,39 @@ jobs:
       - name: Install the timezone database
         run: pip install tzdata
 
-      - name: Fail fast if the bot token is missing
+      # The token now arrives from Infisical at run time, so the credential that
+      # must exist in GitHub is the machine identity, not the bot token itself.
+      # Name it here, so a missing identity fails with an instruction instead of
+      # an action error.
+      - name: Fail fast if the Infisical identity is missing
         env:
-          TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CLIENT_ID: ${{ secrets.INFISICAL_CLIENT_ID }}
+          CLIENT_SECRET: ${{ secrets.INFISICAL_CLIENT_SECRET }}
         run: |
-          if [ -z "$TOKEN" ]; then
-            echo "::error::TELEGRAM_BOT_TOKEN is not set in this repository"
-            echo "Add it under Settings > Secrets and variables > Actions."
+          if [ -z "$CLIENT_ID" ] || [ -z "$CLIENT_SECRET" ]; then
+            echo "::error::the Infisical machine identity is not set in this repository"
+            echo "Add INFISICAL_CLIENT_ID and INFISICAL_CLIENT_SECRET under Settings > Secrets and variables > Actions."
             exit 1
           fi
 
+      # Secrets are fetched from Infisical, not read from GitHub Secrets: a
+      # rotated bot token or a new Upstash database takes effect on the next run
+      # with nothing committed here. The identity is scoped to this one project
+      # and one environment, so it cannot read anything else.
+      - name: Fetch secrets from Infisical
+        uses: Infisical/secrets-action@d2e351f16c6ca20d17c85e6c992e04bdeb64e87d # v1.0.18
+        with:
+          method: "universal-auth"
+          client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
+          client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+          project-slug: ${{ vars.INFISICAL_PROJECT_SLUG }}
+          # The whole dev environment is injected, including
+          # UPSTASH_REDIS_REST_URL / _TOKEN, which the runner needs to find the
+          # chat connected through the Connect page. Without them it falls back
+          # to a local binding.json it writes and throws away.
+          env-slug: "dev"
+
+      # Every value in the dev environment is now in this job's environment, so
+      # the command reads exactly what it always did.
       - name: Send the reminder
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          # The connected chat lives on an Upstash store on the host that serves
-          # the Connect page. Without these the runner falls back to a local
-          # binding.json, which it writes and then throws away -- so a chat
-          # connected through the web page would silently stop being reachable.
-          # Unset is safe: it degrades to config.json / the local file.
-          UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
-          UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
         run: python -m reminder --scheduled

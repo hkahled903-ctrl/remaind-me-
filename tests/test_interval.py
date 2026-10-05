@@ -333,12 +333,26 @@ class HeartbeatWorkflowTest(unittest.TestCase):
             re.search(r"TELEGRAM_BOT_TOKEN:\s*(?!\$\{\{)\S", self.text),
             "a token-shaped literal must never appear in the workflow",
         )
-        self.assertIn("${{ secrets.TELEGRAM_BOT_TOKEN }}", self.text)
+        # The token is fetched from Infisical, not stored in GitHub Secrets, so
+        # the workflow must not name one either.
+        self.assertNotIn("secrets.TELEGRAM_BOT_TOKEN", self.text)
+        self.assertIn("Infisical/secrets-action@", self.text)
 
     def test_i24_the_durable_store_is_passed_to_the_heartbeat(self):
-        """Without these the runner forgets, and the reminder repeats all day."""
-        self.assertIn("${{ secrets.UPSTASH_REDIS_REST_URL }}", self.text)
-        self.assertIn("${{ secrets.UPSTASH_REDIS_REST_TOKEN }}", self.text)
+        """Without these the runner forgets, and the reminder repeats all day.
+
+        Infisical holds the pair now, so the repository cannot check that it is
+        there -- only that nothing stale is left behind to disagree with it, and
+        that the heartbeat fetches the whole environment rather than a subset.
+        """
+        self.assertIn("Infisical/secrets-action@", self.text)
+        self.assertNotIn("secrets.UPSTASH_REDIS_REST_URL", self.text)
+        self.assertNotIn("secrets.UPSTASH_REDIS_REST_TOKEN", self.text)
+        self.assertNotIn(
+            "secret-path:",
+            self.text,
+            "a secret-path would exclude the durable store and the beat would repeat",
+        )
 
     def test_i25_the_daily_workflow_is_untouched_by_this_feature(self):
         """Interval mode is additive; the daily reminder keeps its own cron."""

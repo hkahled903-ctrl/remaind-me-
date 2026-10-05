@@ -66,8 +66,16 @@ class ReminderWorkflowTest(unittest.TestCase):
             "the flat module was replaced by the package; do not bring it back",
         )
 
-    def test_p3_token_comes_from_a_secret_and_never_from_source(self):
-        self.assertIn("${{ secrets.TELEGRAM_BOT_TOKEN }}", self.text)
+    def test_p3_token_is_injected_at_run_time_and_never_stored_in_the_workflow(self):
+        """The token comes from Infisical now, so it is in no repository at all.
+
+        This used to assert `${{ secrets.TELEGRAM_BOT_TOKEN }}` was wired up.
+        Secrets live in Infisical, so the stronger invariant is the opposite
+        one: the workflow must name no GitHub secret for the token, because
+        nothing here can leak with it. The only credential GitHub still holds
+        is the machine identity that fetches the values.
+        """
+        self.assertNotIn("secrets.TELEGRAM_BOT_TOKEN", self.text)
         # \S after the negative lookahead stops backtracking from matching the
         # whitespace before a legitimate ${{ secrets... }} value.
         hardcoded = re.search(r"TELEGRAM_BOT_TOKEN:\s*(?!\$\{\{)\S", self.text)
@@ -75,6 +83,15 @@ class ReminderWorkflowTest(unittest.TestCase):
             hardcoded, f"token looks hardcoded: {hardcoded and hardcoded.group(0)}"
         )
         self.assertNotRegex(self.text, r"\d{8,10}:[A-Za-z0-9_-]{30,}")
+        # ... and the values do arrive from somewhere, so deleting the fetch
+        # step cannot pass by leaving no secret wiring at all.
+        self.assertIn("Infisical/secrets-action@", self.text)
+        referenced = set(re.findall(r"secrets\.(\w+)", self.text))
+        self.assertLessEqual(
+            referenced,
+            {"INFISICAL_CLIENT_ID", "INFISICAL_CLIENT_SECRET"},
+            f"only the Infisical identity belongs in GitHub Secrets, found {referenced}",
+        )
 
     def test_p4_has_least_privilege_permissions(self):
         # (?m) inline: assertRegex's third argument is the failure message,
