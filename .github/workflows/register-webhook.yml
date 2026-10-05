@@ -74,19 +74,27 @@ jobs:
         run: |
           python -c "
           import os
+          import time
           from reminder.transport import Telegram
           client = Telegram(os.environ['TELEGRAM_BOT_TOKEN'])
           me = client.call('getMe', {}).get('result', {})
           r = client.call('getWebhookInfo', {}).get('result', {})
           allowed = r.get('allowed_updates')
           last_error = r.get('last_error_message')
+          last_error_date = r.get('last_error_date')
           print('bot username   :', me.get('username'))
           print('url            :', r.get('url') or '(NOT REGISTERED)')
           print('allowed_updates:', allowed)
           print('pending updates:', r.get('pending_update_count'))
-          print('last_error_date:', r.get('last_error_date'))
+          print('last_error_date:', last_error_date)
           print('last_error     :', last_error)
           if allowed != ['message', 'callback_query']:
               raise SystemExit('Telegram did not register the required allowed_updates')
           if last_error is not None:
-              raise SystemExit('Telegram reports a webhook delivery error')"
+              if last_error_date is None:
+                  raise SystemExit('Telegram reports an undated webhook delivery error')
+              if time.time() - last_error_date <= 300:
+                  raise SystemExit('Telegram reports a webhook delivery error in the last 5 minutes')
+              print('last_error_status: historical; no delivery error in the last 5 minutes')
+          else:
+              print('last_error_status: none')"
