@@ -31,6 +31,7 @@ from reminder.config import ConfigError, load_config, parse_hhmm  # noqa: E402
 from reminder.policy import next_occurrence, should_send  # noqa: E402
 from reminder.state import already_sent, mark_sent  # noqa: E402
 from reminder.transport import Telegram  # noqa: E402
+from reminder.webapp import register_webhook  # noqa: E402
 
 CAIRO = timezone(timedelta(hours=2))  # Egypt abolished DST in 2023 -> fixed UTC+2
 
@@ -103,6 +104,18 @@ class ScenarioTest(unittest.TestCase):
         }
 
     # ------------------------------------------------- the normal day
+    def test_registration_sends_callback_query_as_a_json_array(self):
+        """Exercise the real registration call and its encoded Bot API request."""
+        register_webhook("https://example.test", " test-secret \n", self.client)
+        call = next(c for c in self.fake.calls if c["path"].endswith("setWebhook"))
+        payload = call["payload"]
+        self.assertEqual(
+            json.loads(payload["allowed_updates"]),
+            ["message", "callback_query"],
+        )
+        self.assertEqual(payload["url"], "https://example.test/telegram/webhook")
+        self.assertEqual(payload["secret_token"], "test-secret")
+
     def test_s1_cron_fires_inside_window_user_gets_one_message(self):
         """Real morning: cron runs at 09:00 Cairo, exactly one message lands."""
         self.assertTrue(

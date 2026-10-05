@@ -552,7 +552,7 @@ def register_webhook(public_url: str, secret: str, client: Telegram) -> None:
         "setWebhook",
         {
             "url": url,
-            "secret_token": secret,
+            "secret_token": secret.strip(),
             "allowed_updates": ["message", "callback_query"],
         },
     )

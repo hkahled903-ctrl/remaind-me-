@@ -29,7 +29,11 @@ class Telegram:
         A 4xx other than 429 is our own fault -- a bad token or chat id -- so it
         fails immediately rather than burning the retry budget.
         """
-        body = urllib.parse.urlencode(payload or {}).encode()
+        form = {
+            key: json.dumps(value) if isinstance(value, (dict, list)) else value
+            for key, value in (payload or {}).items()
+        }
+        body = urllib.parse.urlencode(form).encode()
         last_error = "unknown"
         for attempt in range(MAX_ATTEMPTS):
             url = self._api_base.format(token=self._token, method=method)

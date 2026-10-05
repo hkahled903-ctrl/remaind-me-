@@ -34,8 +34,33 @@ jobs:
           project-slug: ${{ vars.INFISICAL_PROJECT_SLUG }}
           env-slug: "dev"
 
+      # This harmless update has no message/chat, so it cannot bind or change
+      # timer state. A 200 proves Vercel received the exact secret and header.
+      - name: Verify Vercel accepts the Infisical webhook secret
+        run: |
+          python -c "
+          import os
+          import urllib.error
+          import urllib.request
+          request = urllib.request.Request(
+              'https://remaind-me-xi.vercel.app/telegram/webhook',
+              data=b'{}',
+              headers={
+                  'Content-Type': 'application/json',
+                  'X-Telegram-Bot-Api-Secret-Token': os.environ['WEBHOOK_SECRET'].strip(),
+              },
+              method='POST',
+          )
+          try:
+              with urllib.request.urlopen(request, timeout=20) as response:
+                  if response.status != 200:
+                      raise SystemExit(f'Vercel webhook secret check failed with HTTP {response.status}')
+          except urllib.error.HTTPError as exc:
+              raise SystemExit(f'Vercel webhook secret check failed with HTTP {exc.code}; secret was not logged') from None
+          print('Vercel webhook secret check: HTTP 200; secret was not logged')"
+
       # Reuses the app's own register_webhook -- the same call --serve makes.
-      # It sends allowed_updates ["message"], unchanged, and prints only the URL.
+      # It sends message and callback_query updates and prints only the URL.
       - name: Register the webhook
         run: |
           python -c "
@@ -51,7 +76,13 @@ jobs:
           import os
           from reminder.transport import Telegram
           r = Telegram(os.environ['TELEGRAM_BOT_TOKEN']).call('getWebhookInfo', {}).get('result', {})
+          allowed = r.get('allowed_updates')
+          last_error = r.get('last_error_message')
           print('url            :', r.get('url') or '(NOT REGISTERED)')
-          print('allowed_updates:', r.get('allowed_updates'))
+          print('allowed_updates:', allowed)
           print('pending updates:', r.get('pending_update_count'))
-          print('last_error     :', r.get('last_error_message'))"
+          print('last_error     :', last_error)
+          if allowed != ['message', 'callback_query']:
+              raise SystemExit('Telegram did not register the required allowed_updates')
+          if last_error is not None:
+              raise SystemExit('Telegram reports a webhook delivery error')"
