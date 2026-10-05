@@ -120,7 +120,7 @@ class FileConfirm:
             log(f"could not remove {self._path.name}: {exc}")
 
 
-class UpstashConfirm:
+class UpstashConfirm(UpstashStore):
     """The same record in Upstash, so it survives a redeploy like the rest."""
 
     def __init__(self, url: str, token: str, key: str = REDIS_KEY):

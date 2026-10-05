@@ -35,14 +35,21 @@ from reminder.confirm import (  # noqa: E402
     SAVED,
     FileConfirm,
     Pending,
+    UpstashConfirm,
     ask,
+    confirm_store_from_env,
     is_due,
     record_nudge,
     reminder_keyboard,
     resolve,
     seconds_until_next_ask,
 )
-from reminder.settings import FileSettings, Settings  # noqa: E402
+from reminder.settings import (  # noqa: E402
+    FileSettings,
+    Settings,
+    UpstashSettings,
+    settings_store_from_env,
+)
 from reminder.webapp import ConnectApp  # noqa: E402
 
 CAIRO = timezone(timedelta(hours=2))
@@ -319,6 +326,48 @@ class SecondsUntilAskTest(unittest.TestCase):
         pending = ask("555", START)
         self.assertEqual(seconds_until_next_ask(pending, START, 5), 300)
         self.assertEqual(seconds_until_next_ask(pending, START + timedelta(minutes=5), 5), 0)
+
+
+class UpstashSelectionTest(unittest.TestCase):
+    """The Upstash branch of each factory: the branch nothing else ever ran.
+
+    Found the hard way. The first GitHub Actions run that had real credentials
+    arrived from Infisical died with `object.__init__() takes exactly one
+    argument`. Both factories return an Upstash implementation only when *both*
+    `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN` are set, so on a
+    laptop, and in this suite until now, that code path was never constructed:
+    `UpstashConfirm` and `UpstashSettings` were declared with no base class while
+    still calling `super().__init__(url, token, key=key)`, which reached
+    `object` and raised before a single request was sent.
+
+    Calling the factory is therefore the whole guard. Asserting the returned
+    *type* would not have caught it, because the factory returns that type either
+    way -- it is the construction inside the factory call that fails. So these
+    tests also check the inherited REST helper is really there.
+    """
+
+    CREDENTIALS = {
+        "UPSTASH_REDIS_REST_URL": "https://example.invalid",
+        "UPSTASH_REDIS_REST_TOKEN": "dummy-token",
+    }
+
+    def test_f26_the_confirm_store_is_upstash_when_both_credentials_are_set(self):
+        store = confirm_store_from_env(dict(self.CREDENTIALS))
+        self.assertIsInstance(store, UpstashConfirm)
+        self.assertNotIsInstance(store, FileConfirm, "it must not fall back to a file")
+        self.assertEqual(store._url, self.CREDENTIALS["UPSTASH_REDIS_REST_URL"])
+        self.assertTrue(
+            hasattr(store, "_command"), "the REST helper must be inherited, not reimplemented"
+        )
+
+    def test_f27_the_settings_store_is_upstash_when_both_credentials_are_set(self):
+        store = settings_store_from_env(dict(self.CREDENTIALS))
+        self.assertIsInstance(store, UpstashSettings)
+        self.assertNotIsInstance(store, FileSettings, "it must not fall back to a file")
+        self.assertEqual(store._url, self.CREDENTIALS["UPSTASH_REDIS_REST_URL"])
+        self.assertTrue(
+            hasattr(store, "_command"), "the REST helper must be inherited, not reimplemented"
+        )
 
 
 if __name__ == "__main__":

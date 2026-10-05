@@ -141,7 +141,7 @@ class FileSettings:
                 pass
 
 
-class UpstashSettings:
+class UpstashSettings(UpstashStore):
     """The same record in Upstash, reachable from the runner.
 
     Subclasses `UpstashStore` only to expose its REST command helper; every byte
