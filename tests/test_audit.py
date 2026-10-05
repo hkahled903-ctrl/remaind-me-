@@ -57,7 +57,7 @@ class RecordingTelegram:
             return {"ok": True, "result": []}
         raise AssertionError(f"unexpected call {method}")
 
-    def send_message(self, chat_id: str, text: str) -> None:
+    def send_message(self, chat_id: str, text: str, reply_markup=None) -> None:
         self.sent.append(chat_id)
 
 
@@ -173,28 +173,31 @@ class IntervalSpamGuardTest(unittest.TestCase):
         self.store = FileSettings(Path(self.tmp.name) / "settings.json")
         self.store.save(Settings(interval_minutes=15))
 
-    def test_a13_a_file_store_on_ci_refuses_to_send(self):
-        """Reproduced: four simulated runs on a fresh disk each sent, because the
-        marker never survived. On a real */5 cron that is 288 messages a day."""
-        import unittest.mock as mock
+    def test_a13_repeated_heartbeats_never_send_twice(self):
+        """Reproduced: on a */5 cron an unserved marker meant 288 messages a day.
 
-        with mock.patch.dict(os.environ, {"GITHUB_ACTIONS": "true"}, clear=False):
-            self.assertFalse(interval_mode_is_safe(self.store))
-            client = RecordingTelegram()
-            code = cmd_interval(CONFIG, CAIRO, client, self.store, now=datetime.now(CAIRO))
-        self.assertEqual(code, 1, "an ephemeral runner must not send at all")
-        self.assertEqual(client.sent, [], "no message may leave the box")
+        The guard is no longer "is this disk durable" -- it is that the cycle is
+        written before the send, so a second beat on the same store finds the
+        question already open and owes nothing.
+        """
+        from reminder.timer import Cycle, FileCycleStore, activate
+
+        store = FileCycleStore(Path(tempfile.mkdtemp()) / "timer.json")
+        store.save(activate(Cycle(chat_id="555"), 30, datetime.now(timezone.utc)))
+        client = RecordingTelegram()
+        later = datetime.now(timezone.utc) + timedelta(minutes=30)
+        for _ in range(5):
+            cmd_interval(CONFIG, CAIRO, client, store, now=later)
+        self.assertEqual(len(client.sent), 1, "five beats, one message")
 
     def test_a14_a_file_store_on_a_laptop_is_fine(self):
-        import unittest.mock as mock
+        """A laptop is the one place a file store is durable, and it sends."""
+        from reminder.timer import Cycle, FileCycleStore, activate
 
-        # Clear the CI markers so this is genuinely "a laptop", not a machine that
-        # merely happens to have none set today.
-        clean = {k: v for k, v in os.environ.items() if k not in _CI_VARS}
-        with mock.patch.dict(os.environ, clean, clear=True):
-            self.assertTrue(interval_mode_is_safe(self.store))
-            client = RecordingTelegram()
-            code = cmd_interval(CONFIG, CAIRO, client, self.store, now=datetime.now(CAIRO))
+        store = FileCycleStore(Path(tempfile.mkdtemp()) / "timer.json")
+        store.save(activate(Cycle(chat_id="555"), 30, datetime.now(timezone.utc)))
+        client = RecordingTelegram()
+        code = cmd_interval(CONFIG, CAIRO, client, store, now=datetime.now(timezone.utc) + timedelta(minutes=30))
         self.assertEqual(code, 0)
         self.assertEqual(len(client.sent), 1)
 

@@ -38,6 +38,7 @@ from reminder.commands import bot_username
 from reminder.confirm import confirm_store_from_env
 from reminder.config import load_config, resolve_timezone
 from reminder.settings import settings_store_from_env
+from reminder.timer import cycle_store_from_env
 from reminder.transport import Telegram
 from reminder.webapp import SECRET_HEADER, ConnectApp
 
@@ -45,6 +46,7 @@ _CONFIG = load_config()
 _TZ = resolve_timezone(_CONFIG["timezone"])
 _CLIENT = Telegram(os.environ.get("TELEGRAM_BOT_TOKEN", "").strip())
 _SETTINGS = settings_store_from_env()
+_CYCLES = cycle_store_from_env()
 _CONFIRM = confirm_store_from_env()
 _BINDING = store_from_env()
 
@@ -70,8 +72,9 @@ APP = ConnectApp(
     ack=lambda chat_id: _CLIENT.send_message(chat_id, CONFIRMATION),
     answer=lambda cb, text, alert: _CLIENT.answer_callback(cb, text, alert),
     confirm_store=_CONFIRM,
-    on_saved=lambda chat_id: stop_timer(_SETTINGS, _CLIENT, chat_id),
+    on_saved=lambda chat_id: stop_timer(_CYCLES, _CLIENT, chat_id),
     settings_store=_SETTINGS,
+    cycle_store=_CYCLES,
     reminder_time=_CONFIG["reminder_time"],
     tz=_TZ,
 )

@@ -47,7 +47,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from .binding import BindingStore, binding_from_update
 from .confirm import SAVED, ConfirmStore, resolve
 from .logs import log
-from .policy import next_occurrence, seconds_until_next_slot
+from .timer import activate, utcnow
+from .policy import ALLOWED_INTERVALS, next_occurrence, seconds_until_next_slot
 from .settings import SettingsStore, validate_interval
 from .transport import Telegram
 
@@ -83,6 +84,7 @@ class ConnectApp:
         confirm_store: ConfirmStore | None = None,
         on_saved=None,
         settings_store: SettingsStore | None = None,
+        cycle_store=None,
         reminder_time: str = "09:00",
         tz=None,
     ):
@@ -102,19 +104,25 @@ class ConnectApp:
         # routing; this module only knows when the button was pressed.
         self._on_saved = on_saved
         self.settings_store = settings_store
+        # Per-chat timers. The settings/confirm stores above remain only so the
+        # daily path keeps working; every user-facing read below goes through the
+        # cycle store, keyed by chat id.
+        self.cycle_store = cycle_store
         self.reminder_time = reminder_time
         self.tz = tz
         self._nonces: dict[str, float] = {}
         self._lock = threading.Lock()
 
     # -- schedule ----------------------------------------------------------
-    def schedule(self) -> tuple[int, dict]:
+    def schedule(self, query: dict | None = None) -> tuple[int, dict]:
         """The current repeat setting and how long until the next reminder.
 
         The countdown is computed server-side and the browser ticks down from it,
         so a wrong client clock cannot make the page promise a time that was never
         calculated.
         """
+        if self.cycle_store is not None:
+            return self._cycle_schedule(query_chat(query))
         settings = self.settings_store.load() if self.settings_store else None
         interval = settings.interval_minutes if settings else 0
         if settings is not None and settings.is_silent:
@@ -164,6 +172,8 @@ class ConnectApp:
             minutes = validate_interval(payload.get("minutes"))
         except ValueError as exc:
             return 400, {"ok": False, "error": f"{str(exc).rstrip('.')}. Pick one of the listed intervals."}
+        if self.cycle_store is not None:
+            return self._activate_cycle(minutes, query_chat(payload))
         settings = self.settings_store.load()
         settings.interval_minutes = minutes
         settings.last_slot = ""  # a stale marker must not survive a change
@@ -185,6 +195,58 @@ class ConnectApp:
         }
 
     # -- nonce bookkeeping -------------------------------------------------
+    def _scope_chat(self, requested: str = "") -> str:
+        """Which chat this page is acting for.
+
+        An explicit `chat` wins, but only if it is one this bot has actually
+        bound -- otherwise anyone could drive another user's timer by guessing
+        an id. Falling back to the bound chat keeps the one-page flow working.
+        """
+        binding = self.store.load()
+        known = str(getattr(binding, "chat_id", "") or "") if binding else ""
+        try:
+            registered = set(self.cycle_store.known_chats()) if self.cycle_store else set()
+        except Exception:
+            registered = set()
+        allowed = {c for c in registered if c}
+        if known:
+            allowed.add(known)
+        if requested and requested in allowed:
+            return requested
+        return known or (sorted(allowed)[0] if allowed else "")
+
+    def _cycle_schedule(self, chat_id: str) -> tuple[int, dict]:
+        """The countdown for one chat, from the same instant the worker uses."""
+        now = datetime_now(self.tz)
+        cycle = self.cycle_store.load(chat_id) if chat_id else None
+        interval = cycle.interval_minutes if cycle else 0
+        return 200, {
+            "interval_minutes": interval,
+            "seconds_until": cycle.seconds_until_next_send(now) if cycle else 0,
+            "stopped": bool(cycle.stopped) if cycle else True,
+            "chat_id": chat_id,
+            "options": list(ALLOWED_INTERVALS),
+        }
+
+    def _activate_cycle(self, minutes: int, requested: str = "") -> tuple[int, dict]:
+        """Start (or restart) one chat's cycle. Rejects an unbound target."""
+        chat_id = self._scope_chat(requested)
+        if not chat_id:
+            return 400, {
+                "ok": False,
+                "error": "No Telegram chat is connected yet. Press Start in Telegram first.",
+            }
+        cycle = activate(self.cycle_store.load(chat_id), minutes, utcnow())
+        self.cycle_store.save(cycle)
+        self.cycle_store.remember(chat_id)
+        return 200, {
+            "ok": True,
+            "interval_minutes": cycle.interval_minutes,
+            "seconds_until": cycle.seconds_until_next_send(utcnow()),
+            "stopped": False,
+            "chat_id": chat_id,
+        }
+
     def new_nonce(self) -> tuple[str, float]:
         nonce = secrets.token_urlsafe(12)
         now = time.time()
@@ -226,8 +288,22 @@ class ConnectApp:
         }
 
     def status(self, query: dict) -> tuple[int, dict]:
-        """Report whether a binding exists that postdates the page load."""
-        binding = self.store.load()
+        """Report whether a binding exists that postdates the page load.
+
+        An unreachable store is neither "connected" nor "not connected", and
+        `BindingStore` is documented to raise rather than let those two look
+        alike. So this returns 503 with `connected: None` -- the third answer.
+        Reporting `connected: False` here would be a lie that makes a working
+        setup look broken and sends the user off to press Connect again.
+
+        Any transient outage also self-heals: the page keeps polling, so the next
+        tick reads the store once it is back.
+        """
+        try:
+            binding = self.store.load()
+        except Exception as exc:
+            log(f"could not read the connected chat ({exc}); status is unknown.")
+            return 503, {"connected": None, "error": "connection store unreachable"}
         if binding is None:
             return 200, {"connected": False}
         issued = self._issued(query.get("nonce", ""))
@@ -303,43 +379,44 @@ class ConnectApp:
         return 200, {"ok": True, "bound": True, "chat_id": binding.chat_id}
 
     def callback(self, update: dict) -> tuple[int, dict]:
-        """A button press. Only the chat that was asked may answer.
+        """A button press, resolved against the pressing chat's own cycle.
 
-        The ownership check is the whole point: this endpoint is authenticated
-        with the webhook secret, which proves the update came from Telegram, not
-        that it came from *your* chat. Without comparing `chat_id`, anyone who
-        ever pressed "Not yet" once could stop somebody else's timer.
+        The ownership check is the whole point. The webhook secret proves the
+        update came from Telegram, not that it came from *your* chat -- so before
+        anything is stopped we read the cycle belonging to the chat id in the
+        update and require that this chat has a question actually open. With one
+        cycle per chat there is no global record to corrupt, so a stranger's tap
+        finds nothing of the victim's to touch.
         """
         query = update.get("callback_query") or {}
         query_id = str(query.get("id", ""))
         action = str(query.get("data", ""))
         chat_id = str(((query.get("message") or {}).get("chat") or {}).get("id", ""))
 
-        pending = self.confirm_store.load() if self.confirm_store else None
-        if pending is None:
+        if not chat_id:
+            self._ack_callback(query_id, "Could not tell which chat this was.", alert=True)
             return 200, {"ok": True, "action": action, "resolved": False}
 
-        if str(pending.chat_id) != chat_id:
-            # Not the chat that was asked. Answer the spinner so the tap does not
-            # hang, but change nothing.
-            log(f"WARNING: ignoring '{action}' from chat {chat_id or '?'}; not the asked chat.")
-            self._ack_callback(query_id, "This reminder belongs to another chat.", alert=True)
+        cycle = self.cycle_store.load(chat_id) if self.cycle_store else None
+        if cycle is None or not cycle.pending:
+            # Nothing of theirs is open. Answer the spinner, change nothing.
+            log(f"WARNING: ignoring '{action}' from chat {chat_id}; it has no open question.")
+            self._ack_callback(query_id, "You have no open reminder.", alert=True)
             return 200, {"ok": True, "action": action, "resolved": False}
 
         if resolve(action):
-            self.confirm_store.clear()
             if self._on_saved is not None:
                 try:
                     self._on_saved(chat_id)
                 except Exception as exc:
-                    # The question is already closed. If stopping the schedule
-                    # failed, say so in the log rather than pretending it worked.
-                    log(f"could not stop the timer: {exc}")
-            log("user saved it; the timer stops until a new time is set.")
+                    log(f"could not stop the timer for chat {chat_id}: {exc}")
+            log(f"chat {chat_id} saved it; its timer stops until a new time is set.")
             self._ack_callback(query_id, "Saved. No more reminders until you set a new time.")
             return 200, {"ok": True, "action": action, "resolved": True}
 
-        # "Not yet": keep the question open and let the nudge heartbeat re-ask.
+        # "Not yet": nothing to write. The cycle is already open, and the nudge
+        # heartbeat re-asks five minutes after the last message. Pressing this
+        # must not restart the interval or reset the cadence.
         self._ack_callback(query_id, "Okay, I will ask again.")
         return 200, {"ok": True, "action": action, "resolved": False}
 
@@ -377,6 +454,14 @@ class ConnectApp:
         self.store.clear()
         log("binding cleared.")
         return 200, {"ok": True}
+
+
+def query_chat(query: dict | None) -> str:
+    """The `chat` a page request is scoped to, if it names one."""
+    if not isinstance(query, dict):
+        return ""
+    value = query.get("chat") or ""
+    return str(value).strip() if isinstance(value, (str, int)) else ""
 
 
 def datetime_now(tz):
@@ -452,7 +537,17 @@ def _make_handler(app: ConnectApp):
 def register_webhook(public_url: str, secret: str, client: Telegram) -> None:
     """Point Telegram at this host. Idempotent; safe to call on every boot."""
     url = f"{public_url.rstrip('/')}/telegram/webhook"
-    client.call("setWebhook", {"url": url, "secret_token": secret, "allowed_updates": ["message"]})
+    # callback_query is what delivers the "I saved it" / "Not yet" button taps.
+    # Without it Telegram silently discards every press, so the buttons render,
+    # look perfect, and do nothing -- and the timer can then never be stopped.
+    client.call(
+        "setWebhook",
+        {
+            "url": url,
+            "secret_token": secret,
+            "allowed_updates": ["message", "callback_query"],
+        },
+    )
     log(f"webhook registered at {url}")
 
 

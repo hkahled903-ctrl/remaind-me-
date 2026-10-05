@@ -27,6 +27,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from reminder.commands import cmd_interval, resolve_chat_id, set_interval  # noqa: E402
+from reminder.timer import Cycle, FileCycleStore, activate  # noqa: E402
 from reminder.settings import FileSettings  # noqa: E402
 from reminder.policy import ALLOWED_INTERVALS, slot_for  # noqa: E402
 from reminder.settings import FileSettings, Settings, validate_interval  # noqa: E402
@@ -44,7 +45,7 @@ class RecordingTelegram:
     def __init__(self):
         self.sent: list[str] = []
 
-    def send_message(self, chat_id: str, text: str) -> None:
+    def send_message(self, chat_id: str, text: str, reply_markup=None) -> None:
         self.sent.append(f"{chat_id}:{text}")
 
 
@@ -139,54 +140,87 @@ class SettingsFileTest(SettingsStoreCase):
         self.assertEqual(self.store.load().interval_minutes, 0)
 
 
-class IntervalHeartbeatTest(DurableDiskCase):
-    """cmd_interval is the thing the cron calls, over and over."""
+class IntervalHeartbeatTest(unittest.TestCase):
+    """`cmd_interval` is what the */5 cron calls, over and over.
 
-    def heartbeat(self, telegram=None, now=NOW, store=None):
-        client = telegram or RecordingTelegram()
-        return cmd_interval(CONFIG, CAIRO, client, store or self.store, now=now), client
+    The heartbeat is a heartbeat: it fires every five minutes regardless of the
+    user's interval, and the persisted cycle is what decides whether this beat
+    owes anybody a message.
+    """
 
-    def test_i11_heartbeat_is_silent_when_interval_mode_is_off(self):
-        code, client = self.heartbeat()
-        self.assertEqual(code, 0)
+    def setUp(self):
+        import tempfile
+        from pathlib import Path as _P
+
+        from reminder.timer import Cycle, FileCycleStore, activate
+
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.store = FileCycleStore(_P(self.dir.name) / "timer.json")
+        self.chat = "555"
+        self.activate = lambda minutes, now: self.store.save(
+            activate(Cycle(chat_id=self.chat), minutes, now)
+        )
+
+    def beat(self, now, client=None):
+        client = client or RecordingTelegram()
+        cmd_interval(CONFIG, CAIRO, client, self.store, now=now)
+        return client
+
+    def test_i11_heartbeat_is_silent_when_no_interval_is_set(self):
+        client = self.beat(NOW)
         self.assertEqual(client.sent, [], "a quiet heartbeat must not send anything")
 
-    def test_i12_one_send_per_period_no_matter_how_often_the_heartbeat_runs(self):
-        self.store.save(Settings(interval_minutes=30))
+    def test_i11b_nothing_is_sent_before_the_interval_elapses(self):
+        # The bug this replaces: activation used to reset an epoch slot, so the
+        # very next heartbeat sent immediately. Twelve beats here, one send.
+        self.activate(60, NOW)
         client = RecordingTelegram()
+        for minutes in (5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 59):
+            self.beat(NOW + timedelta(minutes=minutes), client)
+        self.assertEqual(client.sent, [], "60 minutes means 60 minutes")
+        self.beat(NOW + timedelta(minutes=60), client)
+        self.assertEqual(len(client.sent), 1, "the first reminder goes out when due")
 
-        code, _ = self.heartbeat(client, now=NOW)
-        self.assertEqual(code, 0)
-        self.assertEqual(len(client.sent), 1, "the first beat of a period sends")
-
-        # Several more beats inside the same period must send nothing more.
-        for minutes in (1, 5, 12, 29):
-            _, _ = self.heartbeat(client, now=NOW + timedelta(minutes=minutes))
-        self.assertEqual(len(client.sent), 1, "a period is a period")
-
-    def test_i13_the_next_period_sends_again(self):
-        self.store.save(Settings(interval_minutes=30))
+    def test_i12_repeated_polling_at_the_due_time_sends_only_one_reminder(self):
+        # Several beats land on or just after the due time. The first one owes
+        # the reminder; the rest must not repeat it. Nudges five minutes after
+        # the reminder are correct and are counted separately below.
+        self.activate(30, NOW)
         client = RecordingTelegram()
-        self.heartbeat(client, now=NOW)
-        self.heartbeat(client, now=NOW + timedelta(minutes=30))
-        self.assertEqual(len(client.sent), 2)
+        for minutes in (30, 30, 31, 32, 34):
+            self.beat(NOW + timedelta(minutes=minutes), client)
+        # Every beat from +30 to +34 is at or past due, but only the first may
+        # send: the nudge gap (5 min) has not elapsed, so no nudge is owed yet.
+        self.assertEqual(len(client.sent), 1, "one activation owes exactly one reminder")
 
-    def test_i14_the_marker_survives_a_new_process_reading_the_same_file(self):
+    def test_i13_the_nudge_cadence_continues_instead_of_repeating_the_reminder(self):
+        self.activate(30, NOW)
+        client = RecordingTelegram()
+        self.beat(NOW + timedelta(minutes=30), client)
+        for minutes in (35, 40, 45, 50, 55, 60, 65):
+            self.beat(NOW + timedelta(minutes=minutes), client)
+        # The question is open, so what follows is nudges -- never a second
+        # "your report is ready".
+        self.assertGreater(len(client.sent), 1, "nudges keep coming")
+        self.assertTrue(client.sent[0].startswith(f"{self.chat}:"))
+
+    def test_i14_the_cycle_survives_a_new_process_reading_the_same_file(self):
         """The case that matters on CI: the next runner has no memory of this one."""
-        self.store.save(Settings(interval_minutes=30))
-        client = RecordingTelegram()
-        self.heartbeat(client, now=NOW)
+        import reminder.timer as timer_mod
 
-        fresh_store = FileSettings(self.store._path)  # what the next runner constructs
-        code = cmd_interval(CONFIG, CAIRO, client, fresh_store, now=NOW + timedelta(minutes=6))
-        self.assertEqual(code, 0)
-        self.assertEqual(len(client.sent), 1, "the new runner honoured the stored marker")
-
-    def test_i15_the_sent_message_keeps_the_configured_chat(self):
-        self.store.save(Settings(interval_minutes=60))
+        self.activate(30, NOW)
         client = RecordingTelegram()
-        self.heartbeat(client, now=NOW)
-        self.assertTrue(client.sent[0].startswith("555:"))
+        self.beat(NOW + timedelta(minutes=30), client)
+
+        fresh_store = timer_mod.FileCycleStore(self.store._path)  # the next runner
+        cmd_interval(CONFIG, CAIRO, client, fresh_store, now=NOW + timedelta(minutes=31))
+        self.assertEqual(len(client.sent), 1, "the new runner honoured the stored cycle")
+
+    def test_i15_the_message_goes_to_the_chat_that_activated_it(self):
+        self.activate(60, NOW)
+        client = self.beat(NOW + timedelta(minutes=60))
+        self.assertTrue(client.sent[0].startswith(f"{self.chat}:"))
 
 
 class ServeStartupTest(unittest.TestCase):
@@ -273,23 +307,41 @@ class PortFromEnvTest(unittest.TestCase):
             self.assertEqual(port_from_env(8000), 8000, f"PORT={bad!r} must not win")
 
 
-class SetIntervalTest(SettingsStoreCase):
-    def test_i16_setting_an_interval_clears_a_stale_marker(self):
-        self.store.save(Settings(interval_minutes=30, last_slot="999"))
-        self.assertEqual(set_interval(self.store, 60), 0)
-        after = self.store.load()
+class SetIntervalTest(unittest.TestCase):
+    """`set_interval` starts one chat's cycle. It no longer writes a global
+    record, because with several people a shared record means one person's
+    button changes everybody's schedule."""
+
+    def setUp(self):
+        import tempfile
+        from pathlib import Path as _P
+
+        from reminder.timer import Cycle, FileCycleStore
+
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.store = FileCycleStore(_P(self.dir.name) / "timer.json")
+        self.store.save(Cycle(chat_id="555", interval_minutes=30))
+
+    def test_i16_activating_discards_the_previous_markers(self):
+        self.assertEqual(set_interval(self.store, 60, "555", now=NOW), 0)
+        after = self.store.load("555")
         self.assertEqual(after.interval_minutes, 60)
-        self.assertEqual(after.last_slot, "", "a stale marker must not cross over")
+        self.assertEqual(after.asked_at, "", "a stale question must not cross over")
+        self.assertEqual(after.nudges, 0)
+
+    def test_i16b_activating_one_chat_leaves_another_untouched(self):
+        self.store.save(Cycle(chat_id="777", interval_minutes=15))
+        set_interval(self.store, 60, "555", now=NOW)
+        self.assertEqual(self.store.load("777").interval_minutes, 15)
+
+    def test_i16c_activating_without_a_chat_changes_nothing(self):
+        self.assertEqual(set_interval(self.store, 60, "", now=NOW), 1)
+        self.assertEqual(self.store.load("555").interval_minutes, 30)
 
     def test_i17_an_unlisted_interval_is_refused_and_changes_nothing(self):
-        self.store.save(Settings(interval_minutes=30))
-        self.assertEqual(set_interval(self.store, 45), 1)
-        self.assertEqual(self.store.load().interval_minutes, 30)
-
-    def test_i18_zero_restores_daily_mode(self):
-        self.store.save(Settings(interval_minutes=30))
-        self.assertEqual(set_interval(self.store, 0), 0)
-        self.assertFalse(self.store.load().is_interval)
+        self.assertEqual(set_interval(self.store, 45, "555", now=NOW), 1)
+        self.assertEqual(self.store.load("555").interval_minutes, 30)
 
 
 class ResolveChatTest(unittest.TestCase):

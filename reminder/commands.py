@@ -13,13 +13,9 @@ from pathlib import Path
 
 from .config import chat_id_from, parse_hhmm
 from .confirm import (
-    MAX_NUDGES,
     ConfirmStore,
-    ask,
     confirm_store_from_env,
-    is_due,
     nudge_text,
-    record_nudge,
     reminder_keyboard,
 )
 from .logs import log
@@ -30,7 +26,15 @@ from .settings import (
     settings_store_from_env,
     validate_interval,
 )
-from .state import already_sent, mark_sent
+from .state import already_sent, mark_sent as mark_sent_today
+from .timer import (
+    activate,
+    cycle_store_from_env,
+    mark_sent,
+    serve_cycles,
+    stop_cycle,
+    utcnow,
+)
 from .transport import Telegram
 from .webapp import ConnectApp, register_webhook, serve
 
@@ -90,7 +94,7 @@ def deliver(
         ask_with_buttons(client, confirm_store, chat_id, config["message"], moment)
     else:
         client.send_message(chat_id, config["message"])
-    mark_sent(today, state_path)
+    mark_sent_today(today, state_path)
     log(f"sent to chat_id={chat_id}")
     return True
 
@@ -196,19 +200,18 @@ STOPPED_NOTICE = (
 )
 
 
-def stop_timer(settings_store, client: Telegram | None = None, chat_id: str = "") -> int:
-    """The 'I saved' handler: silence the schedule, not just the question.
+def stop_timer(cycle_store, client: Telegram | None = None, chat_id: str = "") -> int:
+    """The 'I saved' handler: end this chat's cycle, and only this chat's.
 
-    Both halves matter. Clearing the pending stops the nudges; setting `stopped`
-    stops the *next period* from arriving as well. Without the second, the user
-    presses 'I saved', feels finished, and gets another reminder fifteen minutes
-    later -- which is the behaviour this feature exists to remove.
+    Scoping the write to `chat_id` is the whole multi-user guarantee here. The
+    old version mutated one global record, so one person finishing their report
+    silently cancelled everybody else's timer.
     """
-    settings = settings_store.load()
-    settings.stopped = True
-    settings.last_slot = ""
-    settings_store.save(settings)
-    log("saved; the timer is off until a new time is set.")
+    if not chat_id:
+        log("ERROR: 'I saved it' arrived with no chat id; nothing was stopped.")
+        return 1
+    cycle_store.save(stop_cycle(cycle_store.load(chat_id)))
+    log(f"chat {chat_id} saved; its timer is off until a new time is set.")
     if client is not None and chat_id:
         try:
             client.send_message(chat_id, STOPPED_NOTICE)
@@ -217,44 +220,62 @@ def stop_timer(settings_store, client: Telegram | None = None, chat_id: str = ""
     return 0
 
 
-def ask_with_buttons(
-    client: Telegram,
-    confirm_store: ConfirmStore,
-    chat_id: str,
-    text: str,
-    now: datetime,
-) -> None:
-    """Send the reminder with its two buttons, and open the question.
+def serve_due(client: Telegram, store, message: str, now=None) -> int:
+    """One heartbeat: message every chat whose next send time has arrived.
 
-    A message with no buttons would leave the user nothing to press, and the
-    nudge heartbeat would then nag someone who already finished. The buttons and
-    the open question are therefore the same act.
+    Both crons call this. There is one engine, not two, so the "first reminder"
+    and the "nudge" are the same act distinguished only by which timestamp was
+    crossed -- and the two five-minute workflows cannot disagree about it.
+
+    Duplicate protection is two independent guards, because the two crons can
+    overlap and GitHub can retry:
+
+    1. `claim` is a Redis SET NX. Whichever worker creates the key owns this
+       beat; the other sees False and sends nothing. The key expires, so a worker
+       that dies mid-send cannot lock a chat out of the next one.
+    2. The state is written *before* the send, so a crash afterwards costs one
+       missed beat rather than a duplicate message.
+
+    That yields at-most-once delivery, not exactly-once. Telegram's sendMessage
+    is not transactional with Redis and cannot be made so; when the two
+    disagree, this system chooses to miss rather than to double-message.
     """
-    client.send_message(chat_id, text, reply_markup=reminder_keyboard())
-    confirm_store.save(ask(chat_id, now))
+    moment = now if now is not None else utcnow()
+    sent = 0
+    for cycle in serve_cycles(store, moment):
+        if not store.claim(cycle.chat_id, cycle.cycle):
+            log(f"chat {cycle.chat_id}: another worker owns this beat; skipping.")
+            continue
+        first = not cycle.pending
+        text = message if first else nudge_text(cycle.nudges + 1)
+        store.save(mark_sent(cycle, moment))
+        try:
+            client.send_message(cycle.chat_id, text, reply_markup=reminder_keyboard())
+        except Exception:
+            # The record already says this beat was served. Releasing the claim
+            # would let a retry send it again; leaving it is what makes this
+            # at-most-once.
+            log(f"chat {cycle.chat_id}: Telegram rejected the message; this beat is lost.")
+            raise
+        log(
+            f"{'reminder' if first else f'nudge {cycle.nudges + 1}'} sent to "
+            f"chat {cycle.chat_id}"
+        )
+        sent += 1
+    if not sent:
+        log("nothing was due on this beat.")
+    return sent
 
 
-def cmd_nudge(client: Telegram, confirm_store: ConfirmStore, now=None, every_minutes: int = 5) -> int:
-    """Ask again if -- and only if -- the question is open and due.
+def cmd_interval(config: dict, tz, client: Telegram, store, now=None, **kwargs) -> int:
+    # Exit code, not a message count: a quiet beat must be 0 so the cron is not
+    # red every five minutes. `serve_due` raises if Telegram refuses.
+    serve_due(client, store, config.get("message", ""), now)
+    return 0
 
-    This is the second half of the feature. It runs on its own short cron and
-    sends nothing at all when there is no open question, which is what makes
-    "I saved it" genuinely stop the reminders.
-    """
-    moment = now if now is not None else datetime.now(timezone.utc)
-    pending = confirm_store.load()
-    if pending is None:
-        return 0
-    if not is_due(pending, moment, every_minutes):
-        return 0
-    if pending.nudges >= MAX_NUDGES:
-        log(f"giving up after {pending.nudges} nudges; nothing was sent.")
-        confirm_store.clear()
-        return 0
-    updated = record_nudge(pending, moment)
-    client.send_message(pending.chat_id, nudge_text(updated.nudges), reply_markup=reminder_keyboard())
-    confirm_store.save(updated)
-    log(f"nudge {updated.nudges} sent to chat_id={pending.chat_id}")
+
+def cmd_nudge(client: Telegram, store, now=None, **kwargs) -> int:
+    serve_due(client, store, "", now)
     return 0
 
 
@@ -381,106 +402,29 @@ def cmd_serve(
     return 0
 
 
-def cmd_interval(
-    config: dict,
-    tz,
-    client: Telegram,
-    settings_store,
-    binding_store=None,
-    now=None,
-    confirm_store: ConfirmStore | None = None,
-) -> int:
-    """One heartbeat of the repeating schedule.
+def set_interval(store, minutes, chat_id: str, now=None) -> int:
+    """Activate a new interval for exactly one chat. The only way out of STOPPED.
 
-    The cron fires on a fixed fine-grained beat and this decides whether that
-    particular beat belongs to a period that has not been served yet. Two things
-    make it safe to run often:
-
-    * the period is derived from the clock, not from process start, so a restart
-      cannot open a fresh window and re-send;
-    * the served marker is written to the durable store, so the next runner --
-      a different machine with no memory of this one -- sees it.
-
-    Exits 0 in every case, including "nothing to do", so a quiet heartbeat is not
-    a red build. `now` is injectable so the period boundaries are testable without
-    a fake clock, the same way `policy` takes the moment it is deciding about.
-    """
-    settings = settings_store.load()
-    if settings.is_silent:
-        log("the timer was stopped after 'I saved'; nothing to do on this heartbeat.")
-        log("       Set a new time (--every, or the page) to start it again.")
-        return 0
-    if not settings.is_interval:
-        log("interval reminders are off; nothing to do on this heartbeat.")
-        return 0
-
-    # The dangerous case is not "interval mode is off", it is "interval mode is on
-    # and this host cannot remember what it already sent". On an ephemeral CI
-    # runner that means every */5 beat sends, so the user gets 288 messages a day.
-    # Refusing is louder than sending and hoping.
-    if not interval_mode_is_safe(settings_store):
-        log("ERROR: this runner's disk does not survive the run, so interval mode")
-        log("       cannot tell a served period from a new one. Every heartbeat")
-        log("       would send. Nothing was sent.")
-        log("       Fix: set UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN,")
-        log("       or REMINDER_ALLOW_FILE_INTERVAL=1 if this disk really is durable.")
-        return 1
-
-    now = now if now is not None else datetime.now(tz)
-    if now.tzinfo is None:
-        log("ERROR: the heartbeat timestamp has no timezone; refusing to guess.")
-        return 1
-    slot = slot_for(now, settings.interval_minutes)
-    if settings.last_slot == slot:
-        log(f"period {slot} already served; nothing to do.")
-        return 0
-
-    # An unanswered question outranks the schedule. The user has been asked
-    # "did you save it?" and has not said; sending another reminder on top of that
-    # is nagging twice over, and it is the exact case the buttons exist to stop.
-    # `--nudge` keeps asking; this heartbeat stays quiet until they answer.
-    if confirm_store is not None:
-        pending = confirm_store.load()
-        if pending is not None and pending.is_active:
-            log("an open question is waiting for an answer; no new reminder sent.")
-            log("       `--nudge` will keep asking until the user presses a button.")
-            return 0
-
-    chat_id = resolve_chat_id(config, binding_store)
-    if confirm_store is not None:
-        ask_with_buttons(client, confirm_store, chat_id, config["message"], now)
-    else:
-        client.send_message(chat_id, config["message"])
-    settings.last_slot = slot
-    settings_store.save(settings)
-    log(
-        f"sent to chat_id={chat_id} for period {slot} "
-        f"(every {settings.interval_minutes} minutes)"
-    )
-    return 0
-
-
-def set_interval(settings_store, minutes, confirm_store: ConfirmStore | None = None) -> int:
-    """Store a new interval. Rejects anything not on the offered list.
-
-    Setting a time is what resumes a stopped timer, so any open question is
-    cleared here. Without that, a user who had pressed "I saved" would be asked
-    again by the nudge heartbeat for the previous report.
+    The previous version wrote a global settings record, so five people shared
+    one timer and whoever pressed the button last owned it. Now the chat id is
+    part of the write, and `activate` discards the previous cycle's open
+    question so a new interval can never inherit a stale one.
     """
     try:
         value = validate_interval(minutes)
     except ValueError as exc:
         log(str(exc))
         return 1
-    if confirm_store is not None:
-        confirm_store.clear()
-    settings = settings_store.load()
-    # Changing the period must not inherit the old marker: the new slot numbering
-    # differs, and carrying a stale value across would be harmless only by luck.
-    settings.interval_minutes = value
-    settings.last_slot = ""
-    # Setting a time is how a stopped timer starts again.
-    settings.stopped = False
-    settings_store.save(settings)
-    log("daily mode restored" if value == 0 else f"reminder interval set to every {value} minutes")
+    if not chat_id:
+        log("ERROR: no chat id to activate a timer for.")
+        return 1
+    moment = now if now is not None else utcnow()
+    cycle = store.load(chat_id)
+    store.save(activate(cycle, value, moment))
+    store.remember(chat_id)
+    due = store.load(chat_id).due_at
+    log(
+        f"chat {chat_id}: every {value} minutes, first reminder at "
+        f"{due.strftime('%H:%M UTC') if due else 'unknown'}."
+    )
     return 0

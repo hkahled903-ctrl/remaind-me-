@@ -31,6 +31,7 @@ from .config import (
 )
 from .logs import configure_console, log
 from .settings import settings_store_from_env
+from .timer import cycle_store_from_env
 from .transport import Telegram
 
 USAGE = (
@@ -111,11 +112,9 @@ def main(argv: list[str]) -> int:
     if "--serve" in args:
         return cmd_serve(config, tz, client, store, confirm_store=confirm_store)
     if "--interval" in args:
-        return cmd_interval(
-            config, tz, client, settings_store_from_env(), store, confirm_store=confirm_store
-        )
+        return cmd_interval(config, tz, client, cycle_store_from_env())
     if "--nudge" in args:
-        return cmd_nudge(client, confirm_store)
+        return cmd_nudge(client, cycle_store_from_env())
     if "--connect" in args:
         return cmd_connect(client, store)
     if "--whoami" in args:

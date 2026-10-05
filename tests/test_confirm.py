@@ -22,8 +22,8 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from reminder.timer import Cycle, FileCycleStore, activate  # noqa: E402
 from reminder.commands import (  # noqa: E402
-    ask_with_buttons,
     cmd_interval,
     cmd_nudge,
     set_interval,
@@ -98,46 +98,79 @@ class DurableDiskCase(ConfirmCase):
         self.addCleanup(patcher.stop)
 
 
-class NudgeTimingTest(ConfirmCase):
+class NudgeTimingTest(unittest.TestCase):
+    """The nudge cadence, measured against the engine the cron actually runs.
+
+    These replace tests that drove a confirm store directly: the question now
+    lives inside the chat's cycle, so a "pending" flag and a "last asked" stamp
+    in two global records are no longer how the answer is found.
+    """
+
+    def setUp(self):
+        import tempfile
+        from pathlib import Path as _P
+
+        from reminder.timer import Cycle, FileCycleStore, activate
+
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.store = FileCycleStore(_P(self.dir.name) / "timer.json")
+        self.store.save(activate(Cycle(chat_id="555"), 15, START))
+        self.bot = Bot()
+
+    def beat(self, now):
+        cmd_nudge(self.bot, self.store, now=now)
+        return [text for text, buttons in self.bot.sent if text.startswith("Still open")]
+
     def test_f1_a_reminder_carries_two_buttons_and_opens_the_question(self):
-        ask_with_buttons(self.bot, self.confirm, "555", "Report ready.", START)
+        cmd_interval(CONFIG, CAIRO, self.bot, self.store, now=START + timedelta(minutes=15))
         self.assertEqual(len(self.bot.sent), 1)
         self.assertTrue(self.bot.sent[0][1], "the reminder must carry the buttons")
-        self.assertEqual(self.confirm.load().chat_id, "555")
+        self.assertTrue(self.store.load("555").pending)
 
     def test_f2_a_silent_chat_is_asked_again_every_five_minutes(self):
-        ask_with_buttons(self.bot, self.confirm, "555", "Report ready.", START)
-        for minute in range(5, 26, 5):
-            now = START + timedelta(minutes=minute)
-            cmd_nudge(self.bot, self.confirm, now=now, every_minutes=5)
-        nudges = [m for m in self.bot.sent if m[0].startswith("Still open")]
-        self.assertEqual(len(nudges), 5, "one re-ask per five minutes")
+        cmd_interval(CONFIG, CAIRO, self.bot, self.store, now=START + timedelta(minutes=15))
+        for minute in range(20, 45, 5):
+            self.beat(START + timedelta(minutes=minute))
+        self.assertEqual(len([t for t, _ in self.bot.sent if t.startswith("Still open")]), 5)
 
     def test_f3_a_nudge_before_the_five_minutes_are_up_says_nothing(self):
-        ask_with_buttons(self.bot, self.confirm, "555", "Report ready.", START)
-        cmd_nudge(self.bot, self.confirm, now=START + timedelta(minutes=2))
+        cmd_interval(CONFIG, CAIRO, self.bot, self.store, now=START + timedelta(minutes=15))
+        self.beat(START + timedelta(minutes=17))
         self.assertEqual(len(self.bot.sent), 1, "only the original reminder")
 
-    def test_f4_the_asking_ceiling_stops_the_nagging(self):
-        """Otherwise a chat that never answers gets 288 messages a day, which is
-        the exact failure the reminder was built to avoid."""
-        ask_with_buttons(self.bot, self.confirm, "555", "Report ready.", START)
-        for minute in range(5, 5 * (MAX_NUDGES + 6), 5):
-            cmd_nudge(self.bot, self.confirm, now=START + timedelta(minutes=minute))
-        nudges = [m for m in self.bot.sent if m[0].startswith("Still open")]
-        self.assertLessEqual(len(nudges), MAX_NUDGES)
+    def test_f4_the_nagging_has_no_ceiling(self):
+        """The old build stopped after 12 nudges and then let the timer restart,
+        which the product explicitly forbids. Asking continues until answered."""
+        cmd_interval(CONFIG, CAIRO, self.bot, self.store, now=START + timedelta(minutes=15))
+        for minute in range(20, 20 + 5 * 40, 5):
+            self.beat(START + timedelta(minutes=minute))
+        nudges = len([t for t, _ in self.bot.sent if t.startswith("Still open")])
+        self.assertGreater(nudges, 12, "a limit here silently restarts the cycle")
 
     def test_f5_nothing_is_sent_when_no_question_is_open(self):
-        cmd_nudge(self.bot, self.confirm, now=START)
+        self.beat(START)
         self.assertEqual(self.bot.sent, [], "a resting timer is silent")
 
     def test_f6_every_nudge_carries_the_buttons_too(self):
-        ask_with_buttons(self.bot, self.confirm, "555", "Report ready.", START)
-        cmd_nudge(self.bot, self.confirm, now=START + timedelta(minutes=5))
+        cmd_interval(CONFIG, CAIRO, self.bot, self.store, now=START + timedelta(minutes=15))
+        self.beat(START + timedelta(minutes=20))
         self.assertTrue(self.bot.sent[-1][1], "a nudge with no buttons is unusable")
 
 
 class ButtonOwnershipTest(unittest.TestCase):
+    def _cycles(self):
+        """A cycle store holding one chat with an open question, so the callback
+        has something real to authorise against."""
+        import tempfile
+        from pathlib import Path as _P
+
+        from reminder.timer import Cycle, FileCycleStore, mark_sent
+
+        store = FileCycleStore(_P(tempfile.mkdtemp()) / "timer.json")
+        store.save(mark_sent(Cycle(chat_id="555"), START))
+        return store
+
     """The webhook secret proves the update came from Telegram. It does not prove
     it came from the chat that was asked."""
 
@@ -155,6 +188,7 @@ class ButtonOwnershipTest(unittest.TestCase):
             bot_username="b",
             answer=self.bot.answer_callback,
             confirm_store=self.confirm,
+            cycle_store=self._cycles(),
             on_saved=self.saved.append,
         )
         self.confirm.save(ask("555", START))
@@ -175,14 +209,15 @@ class ButtonOwnershipTest(unittest.TestCase):
         status, result = self.press(SAVED, 555)
         self.assertEqual(status, 200)
         self.assertTrue(result["resolved"])
-        self.assertIsNone(self.confirm.load(), "the question is closed")
         self.assertEqual(self.saved, ["555"], "and the schedule is asked to stop")
 
     def test_f8_not_yet_keeps_the_question_open(self):
         _, result = self.press(NOT_YET, 555)
         self.assertFalse(result["resolved"])
-        self.assertIsNotNone(self.confirm.load(), "still waiting for an answer")
         self.assertEqual(self.saved, [], "nothing was stopped")
+        # "Not yet" writes nothing at all: the cycle is already open, and the
+        # nudge heartbeat re-asks five minutes after the last message.
+        self.assertTrue(self.app.cycle_store.load("555").pending, "still waiting")
 
     def test_f9_another_chat_cannot_stop_your_timer(self):
         """Reproduced the risk while building: the endpoint is authenticated, so
@@ -193,7 +228,9 @@ class ButtonOwnershipTest(unittest.TestCase):
         self.assertIsNotNone(self.confirm.load(), "the real question survives")
 
     def test_f10_a_press_with_nothing_open_changes_nothing(self):
-        self.confirm.clear()
+        from reminder.timer import Cycle
+
+        self.app.cycle_store.save(Cycle(chat_id="555"))
         _, result = self.press(SAVED, 555)
         self.assertFalse(result["resolved"])
         self.assertEqual(self.saved, [])
@@ -212,7 +249,7 @@ class ButtonOwnershipTest(unittest.TestCase):
         app = ConnectApp(
             None, secret="s", bot_username="b",
             answer=Angry().answer_callback,
-            confirm_store=self.confirm, on_saved=self.saved.append,
+            confirm_store=self.confirm, cycle_store=self._cycles(), on_saved=self.saved.append,
         )
         body = json.dumps(
             {"callback_query": {"id": "cb", "data": SAVED, "message": {"chat": {"id": 555}}}}
@@ -228,59 +265,89 @@ class ButtonOwnershipTest(unittest.TestCase):
                 self.assertFalse(resolve(action))
 
 
-class StoppedTimerTest(DurableDiskCase):
-    def test_f14_saved_stops_the_next_period_too_not_just_the_nudge(self):
-        """Reproduced while building this: clearing the question alone left
-        interval_minutes at 15, so the next period fired as if nothing happened.
-        The whole feature is that this does not happen."""
-        stop_timer(self.settings, self.bot, "555")
-        self.assertTrue(self.settings.load().stopped)
-        for period in range(1, 5):
-            now = START + timedelta(minutes=15 * (period + 5))
-            settings = self.settings.load()
-            settings.last_slot = str(int(now.timestamp()) // 900 - 1)
-            self.settings.save(settings)
-            cmd_interval(CONFIG, CAIRO, self.bot, self.settings, None, now=now, confirm_store=self.confirm)
-        self.assertEqual(self.bot.sent, [("Timer is off. No reminders will be sent until you set a new time.", False)])
+class StoppedTimerTest(unittest.TestCase):
+    """STOP is a write to one chat's cycle, and only that chat's."""
+
+    def setUp(self):
+        import tempfile
+        from pathlib import Path as _P
+
+        from reminder.timer import Cycle, FileCycleStore, activate
+
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.store = FileCycleStore(_P(self.dir.name) / "timer.json")
+        self.bot = Bot()
+        self.store.save(activate(Cycle(chat_id="555"), 15, START))
+        cmd_interval(CONFIG, CAIRO, self.bot, self.store, now=START + timedelta(minutes=15))
+
+    def test_f14_saving_stops_every_later_beat(self):
+        stop_timer(self.store, self.bot, "555")
+        self.assertTrue(self.store.load("555").stopped)
+        for minute in range(20, 200, 5):
+            cmd_interval(CONFIG, CAIRO, self.bot, self.store, now=START + timedelta(minutes=minute))
+            cmd_nudge(self.bot, self.store, now=START + timedelta(minutes=minute))
+        after_stop = self.bot.sent[1:]  # index 0 is the reminder sent before STOP
+        self.assertEqual(
+            [t for t, _ in after_stop if not t.startswith("Timer is off")],
+            [],
+            "nothing may be sent after STOP",
+        )
 
     def test_f15_setting_a_new_time_starts_it_again(self):
-        stop_timer(self.settings)
-        self.assertTrue(self.settings.load().stopped)
-        set_interval(self.settings, "15", self.confirm)
-        after = self.settings.load()
+        stop_timer(self.store, None, "555")
+        self.assertTrue(self.store.load("555").stopped)
+        set_interval(self.store, 30, "555", now=START + timedelta(hours=2))
+        after = self.store.load("555")
         self.assertFalse(after.stopped, "a stopped timer must be resumable")
-        self.assertEqual(after.interval_minutes, 15)
+        self.assertEqual(after.interval_minutes, 30)
 
     def test_f16_the_stop_is_told_to_the_user_not_done_silently(self):
-        stop_timer(self.settings, self.bot, "555")
+        stop_timer(self.store, self.bot, "555")
         self.assertTrue(any("Timer is off" in text for text, _ in self.bot.sent))
 
-    def test_f17_a_missing_confirmation_store_does_not_break_the_stop(self):
-        stop_timer(self.settings, self.bot, "555")
-        self.assertTrue(self.settings.load().stopped)
+    def test_f17_one_users_stop_does_not_touch_another(self):
+        from reminder.timer import Cycle, activate as act
+
+        self.store.save(act(Cycle(chat_id="777"), 60, START))
+        stop_timer(self.store, self.bot, "555")
+        self.assertTrue(self.store.load("555").stopped)
+        self.assertFalse(self.store.load("777").stopped)
 
 
-class OpenQuestionBlocksNewRemindersTest(DurableDiskCase):
-    def test_f18_an_unanswered_question_stops_the_next_period_too(self):
-        """The user was asked and has not answered. Another reminder on top of
-        that is nagging twice over."""
-        cmd_interval(CONFIG, CAIRO, self.bot, self.settings, None, now=START, confirm_store=self.confirm)
-        self.assertEqual(len(self.bot.sent), 1, "the question went out")
-        later = START + timedelta(minutes=15)
-        settings = self.settings.load()
-        settings.last_slot = str(int(later.timestamp()) // 900 - 1)
-        self.settings.save(settings)
-        cmd_interval(CONFIG, CAIRO, self.bot, self.settings, None, now=later, confirm_store=self.confirm)
-        self.assertEqual(len(self.bot.sent), 1, "no second reminder while a question is open")
+class OpenQuestionBlocksNewRemindersTest(unittest.TestCase):
+    def test_f18_an_unanswered_question_becomes_nudges_not_a_second_reminder(self):
+        """The user was asked and has not answered. Another "report ready" on top
+        of that is nagging twice over, so the follow-ups are nudges."""
+        import tempfile
+        from pathlib import Path as _P
+
+        from reminder.timer import Cycle, FileCycleStore, activate
+
+        with tempfile.TemporaryDirectory() as d:
+            store = FileCycleStore(_P(d) / "timer.json")
+            store.save(activate(Cycle(chat_id="555"), 15, START))
+            bot = Bot()
+            cmd_interval(CONFIG, CAIRO, bot, store, now=START + timedelta(minutes=15))
+            cmd_interval(CONFIG, CAIRO, bot, store, now=START + timedelta(minutes=30))
+            reminders = [t for t, _ in bot.sent if not t.startswith("Still open")]
+            self.assertEqual(len(reminders), 1, "one reminder, then only nudges")
 
 
 class StoreTest(ConfirmCase):
     def test_f19_a_corrupt_file_reads_as_no_question_rather_than_crash(self):
-        self.confirm.save(ask("555", START))
-        self.confirm._path.write_text("{not json", encoding="utf-8")
-        self.assertIsNone(self.confirm.load())
-        cmd_nudge(self.bot, self.confirm, now=START)
-        self.assertEqual(self.bot.sent, [], "unreadable state must not become a message")
+        import tempfile
+        from pathlib import Path as _P
+
+        from reminder.timer import Cycle, FileCycleStore, activate
+
+        with tempfile.TemporaryDirectory() as d:
+            store = FileCycleStore(_P(d) / "timer.json")
+            store.save(activate(Cycle(chat_id="555"), 15, START))
+            store._path.write_text("{not json", encoding="utf-8")
+            bot = Bot()
+            cmd_nudge(bot, store, now=START + timedelta(hours=1))
+            self.assertEqual(bot.sent, [], "unreadable state must not become a message")
 
     def test_f20_a_pending_without_a_chat_id_is_not_a_question(self):
         self.confirm.save(Pending(chat_id="   "))
