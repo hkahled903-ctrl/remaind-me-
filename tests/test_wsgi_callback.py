@@ -125,7 +125,10 @@ class WebhookCallbackTest(unittest.TestCase):
             with urllib.request.urlopen(request, timeout=10) as response:
                 return response.status, json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
-            return exc.code, json.loads(exc.read().decode("utf-8"))
+            # The 403 tests deliberately provoke an error response; close it so
+            # the run does not leak a socket just because a case passed.
+            with exc:
+                return exc.code, json.loads(exc.read().decode("utf-8"))
 
     def tap(self, chat_id: str, data: str, query_id: str = "q1", secret: str | None = SECRET):
         return self.post(
