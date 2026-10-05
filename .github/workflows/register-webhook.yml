@@ -75,12 +75,16 @@ jobs:
           python -c "
           import os
           from reminder.transport import Telegram
-          r = Telegram(os.environ['TELEGRAM_BOT_TOKEN']).call('getWebhookInfo', {}).get('result', {})
+          client = Telegram(os.environ['TELEGRAM_BOT_TOKEN'])
+          me = client.call('getMe', {}).get('result', {})
+          r = client.call('getWebhookInfo', {}).get('result', {})
           allowed = r.get('allowed_updates')
           last_error = r.get('last_error_message')
+          print('bot username   :', me.get('username'))
           print('url            :', r.get('url') or '(NOT REGISTERED)')
           print('allowed_updates:', allowed)
           print('pending updates:', r.get('pending_update_count'))
+          print('last_error_date:', r.get('last_error_date'))
           print('last_error     :', last_error)
           if allowed != ['message', 'callback_query']:
               raise SystemExit('Telegram did not register the required allowed_updates')
