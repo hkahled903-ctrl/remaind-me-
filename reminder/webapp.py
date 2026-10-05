@@ -122,7 +122,7 @@ class ConnectApp:
         calculated.
         """
         if self.cycle_store is not None:
-            return self._cycle_schedule(query_chat(query))
+            return self._cycle_schedule(self._scope_chat(query_chat(query)))
         settings = self.settings_store.load() if self.settings_store else None
         interval = settings.interval_minutes if settings else 0
         if settings is not None and settings.is_silent:
@@ -367,6 +367,14 @@ class ConnectApp:
 
         binding = binding_from_update(message["chat"])
         self.store.save(binding)
+        # Register the chat so the worker can find it and the page can scope to
+        # it. The binding key itself still points at "the most recent /start",
+        # which is why it cannot be the thing a reminder is addressed to.
+        if self.cycle_store is not None:
+            try:
+                self.cycle_store.remember(binding.chat_id)
+            except Exception as exc:
+                log(f"could not register chat {binding.chat_id}: {exc}")
         log(f"bound Telegram chat {binding.chat_id}" + (f" (@{binding.username})" if binding.username else ""))
         # Say something back. A bot that swallows the Start tap in silence is
         # indistinguishable from a broken one, and this tap is the one step the

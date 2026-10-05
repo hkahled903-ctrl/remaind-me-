@@ -406,13 +406,39 @@ class HeartbeatWorkflowTest(unittest.TestCase):
             "a secret-path would exclude the durable store and the beat would repeat",
         )
 
-    def test_i25_the_daily_workflow_is_untouched_by_this_feature(self):
-        """Interval mode is additive; the daily reminder keeps its own cron."""
-        daily = (PROJECT_ROOT / ".github" / "workflows" / "daily-reminder.yml").read_text(
-            encoding="utf-8"
+    def test_i25_there_is_no_independent_daily_sender_left(self):
+        """One engine, one sender.
+
+        The daily workflow used to fire from `reminder_time` on its own schedule
+        and could message a user who had pressed "I saved it". It is deleted, and
+        the Python entry point it used now refuses to send, so neither the file
+        nor the code behind it can produce a reminder outside the cycle engine.
+        """
+        workflows = PROJECT_ROOT / ".github" / "workflows"
+        self.assertFalse(
+            (workflows / "daily-reminder.yml").exists(),
+            "the daily sender must not come back",
         )
-        self.assertIn('cron: "0 7 * * *"', daily)
-        self.assertNotIn("--interval", daily)
+        for path in workflows.glob("*.yml"):
+            text = path.read_text(encoding="utf-8")
+            self.assertNotIn(
+                "--scheduled", text,
+                f"{path.name} would send outside the interval engine",
+            )
+        from reminder.commands import cmd_scheduled
+
+        sent = []
+
+        class NeverCalled:
+            def send_message(self, *a, **k):
+                sent.append(a)
+                raise AssertionError("cmd_scheduled must never send")
+
+        self.assertEqual(
+            cmd_scheduled({"message": "x", "reminder_time": "09:00"}, timezone.utc, NeverCalled(), None),
+            0,
+        )
+        self.assertEqual(sent, [], "the retired daily path must be inert")
 
 
 if __name__ == "__main__":

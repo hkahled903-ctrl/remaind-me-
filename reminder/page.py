@@ -17,7 +17,7 @@ PAGE = """<html lang="en">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#E9EBE5">
-<title>Daily report reminder</title>
+<title>Report reminder</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600&display=swap" rel="stylesheet">
@@ -309,8 +309,8 @@ PAGE = """<html lang="en">
   </div>
 
   <form class="reading" id="reading" novalidate>
-    <h1>Daily report reminder</h1>
-    <p id="blurb">One message a day, in Telegram.</p>
+    <h1>Report reminder</h1>
+    <p id="blurb">Reminders in Telegram, on the interval you pick.</p>
 
     <div class="status">
       <span class="bead" aria-hidden="true"></span>
@@ -371,14 +371,15 @@ function describe(total, interval) {
   const amount = hours > 0
     ? `${hours} hour${hours === 1 ? "" : "s"}`
     : `${minutes} minute${minutes === 1 ? "" : "s"}`;
-  const daily = !interval || Number(interval) === 0;
-  const repeat = daily ? "once a day" : `every ${interval} minutes`;
+  const repeat = interval ? `every ${interval} minutes` : "once you pick a time";
   return `Next reminder in about ${amount}, ${repeat}.`;
 }
 
 function captionFor(interval, stopped) {
+  // The product is interval-only: there is no "tomorrow morning" to promise,
+  // because the next reminder is counted from when the user pressed the button.
   if (stopped) return "Timer off";
-  return !interval || Number(interval) === 0 ? "Until tomorrow morning" : "Until the next one";
+  return interval ? "Until the next one" : "Pick a time to start";
 }
 
 // A stopped timer says so in words, not just by an empty countdown: an empty
@@ -442,9 +443,9 @@ async function save(value) {
   }
   $("caption").classList.remove("is-error");
   $("caption").textContent = captionFor(data.interval_minutes);
-  $("blurb").textContent = data.interval_minutes === 0
-    ? "One message a day, in Telegram."
-    : `One message every ${data.interval_minutes} minutes, in Telegram.`;
+  $("blurb").textContent = data.interval_minutes
+    ? `One message every ${data.interval_minutes} minutes, in Telegram.`
+    : "Reminders in Telegram, on the interval you pick.";
   // Only now, after a confirmed change, is it worth telling a screen reader.
   $("countdown-sentence").textContent = describe(data.seconds_until, data.interval_minutes);
   startCountdown(data.seconds_until, data.interval_minutes);
@@ -459,9 +460,9 @@ async function loadSchedule() {
     return;
   }
   buildPicker(data.options, data.interval_minutes);
-  $("blurb").textContent = data.interval_minutes === 0
-    ? "One message a day, in Telegram."
-    : `One message every ${data.interval_minutes} minutes, in Telegram.`;
+  $("blurb").textContent = data.interval_minutes
+    ? `One message every ${data.interval_minutes} minutes, in Telegram.`
+    : "Reminders in Telegram, on the interval you pick.";
   if (data.stopped) {
     $("caption").textContent = captionFor(data.interval_minutes, true);
     $("countdown").textContent = "--:--";
@@ -506,7 +507,16 @@ function connected(label) {
 }
 
 async function poll() {
-  const res = await fetch(`/connect/status?nonce=${encodeURIComponent(nonce)}`);
+  let res;
+  try {
+    res = await fetch(`/connect/status?nonce=${encodeURIComponent(nonce)}`);
+  } catch (err) {
+    return; // offline; the next tick tries again
+  }
+  // A 503 means the connection store could not be read, not that the answer is
+  // "no". Keep the timer running so a transient outage recovers on its own
+  // instead of stranding the page on "waiting" forever.
+  if (!res.ok) return;
   const data = await res.json();
   if (data.connected) {
     clearInterval(timer);

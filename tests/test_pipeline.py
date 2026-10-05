@@ -23,7 +23,9 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from reminder.config import load_config, parse_hhmm  # noqa: E402
 
 WORKFLOWS = PROJECT_ROOT / ".github" / "workflows"
-REMINDER_WORKFLOW = WORKFLOWS / "daily-reminder.yml"
+# The interval engine is the only sender, so its workflow is the one whose
+# shape matters. The old daily-reminder.yml was deleted deliberately.
+REMINDER_WORKFLOW = WORKFLOWS / "interval-reminder.yml"
 CI_WORKFLOW = WORKFLOWS / "ci.yml"
 
 SHA = re.compile(r"^[0-9a-f]{40}$")
@@ -59,7 +61,7 @@ class ReminderWorkflowTest(unittest.TestCase):
 
     def test_p2_runs_the_package_entry_point_that_actually_exists(self):
         """`python -m reminder` only works if the package is really there."""
-        self.assertIn("python -m reminder --scheduled", self.text)
+        self.assertIn("python -m reminder --interval", self.text)
         self.assertTrue((PROJECT_ROOT / "reminder" / "__main__.py").exists())
         self.assertFalse(
             (PROJECT_ROOT / "reminder.py").exists(),
@@ -114,19 +116,30 @@ class ReminderWorkflowTest(unittest.TestCase):
         self.assertIn("::error::", self.text)
 
     @unittest.skipUnless(HAVE_YAML, "PyYAML not installed; text checks still ran")
-    def test_p10_cron_hour_matches_the_configured_cairo_time(self):
-        """The drift that makes a reminder fire at the wrong hour, caught in CI."""
+    def test_p10_the_heartbeat_is_never_coarser_than_the_nudge_interval(self):
+        """The old check pinned a UTC hour to `reminder_time`.
+
+        There is no clock time any more: the next reminder is counted from when
+        the user pressed the button, and the worker just samples it. What still
+        has to hold is that the cron cannot be coarser than the five-minute nudge
+        gap, or nudges would silently arrive late (or not at all) between beats.
+        """
+        from reminder.timer import NUDGE_MINUTES
+
         doc = yaml.safe_load(self.text)
-        match = re.search(r'cron:\s*"(\d+)\s+(\d+)\s+\*\s+\*\s+\*"', self.text)
-        self.assertIsNotNone(match, "no cron expression found")
-        utc_hour = int(match.group(2))
-        cairo_hour, cairo_minute = parse_hhmm(
-            load_config(PROJECT_ROOT / "config.json")["reminder_time"]
-        )
-        self.assertEqual(int(match.group(1)), 0, "schedule must fire on the hour")
-        self.assertEqual(utc_hour + 2, cairo_hour, "UTC hour does not match config.json")
-        self.assertEqual(cairo_minute, 0)
-        self.assertTrue(triggers(doc).get("schedule"))
+        self.assertTrue(triggers(doc).get("schedule"), "the worker must be scheduled")
+        crons = re.findall(r'cron:\s*"([^"]+)"', self.text)
+        self.assertTrue(crons, "no cron expression found")
+        for expression in crons:
+            every = None
+            if expression.startswith("*/"):  # a heartbeat, e.g. "*/5 * * * *"
+                every = int(expression[2:].split()[0])
+            if every is None:
+                self.fail(f"the interval worker must use a */N cron, not {expression!r}")
+            self.assertLessEqual(
+                every, NUDGE_MINUTES,
+                "a cron coarser than the nudge gap would deliver nudges late",
+            )
 
     @unittest.skipUnless(HAVE_YAML, "PyYAML not installed; text checks still ran")
     def test_p11_job_shape_is_sane(self):

@@ -100,20 +100,23 @@ def deliver(
 
 
 def cmd_scheduled(
-    config, tz, client, state_path, store=None, confirm_store=None, settings_store=None
+    config: dict, tz, client: Telegram, state_path: Path, store=None, confirm_store=None,
+    settings_store=None, now=None,
 ) -> int:
-    """The CI entry point. Skips cleanly when the window is not open."""
-    now = datetime.now(tz)
-    if settings_store is not None and settings_store.load().is_silent:
-        log("the timer was stopped after 'I saved'; nothing to send.")
-        return 0
-    if not should_send(now, config["reminder_time"]):
-        log(
-            f"outside the reminder window (now {now.strftime('%H:%M')}, "
-            f"reminder {config['reminder_time']}); skipping"
-        )
-        return 0
-    deliver(config, tz, client, state_path, store=store, confirm_store=confirm_store)
+    """The old once-a-day sender. Retired: it now refuses to send.
+
+    It used to fire on its own schedule from `config.json`'s `reminder_time`,
+    independently of the chat's cycle -- so it could message somebody who had
+    pressed "I saved it", and it could fire at 09:00 for a user who asked for
+    every 30 minutes. Two senders with two ideas of what "due" means is exactly
+    the bug this rewrite removed. The interval engine in `serve_due` is the only
+    thing that sends.
+
+    The flag is kept so an old workflow or a muscle-memory command exits 0 with
+    an explanation rather than "unrecognised argument" and a red build.
+    """
+    log("the daily reminder has been retired. The interval engine sends reminders;")
+    log("set an interval on the Connect page and a cycle will run on its own.")
     return 0
 
 

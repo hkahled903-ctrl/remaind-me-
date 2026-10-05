@@ -31,7 +31,7 @@ from .config import (
 )
 from .logs import configure_console, log
 from .settings import settings_store_from_env
-from .timer import cycle_store_from_env
+from .timer import cycle_store_from_env, utcnow
 from .transport import Telegram
 
 USAGE = (
@@ -102,13 +102,22 @@ def main(argv: list[str]) -> int:
     # web page. Resolved once, so every sending mode sees the same answer.
     store = store_from_env()
 
+    def connected_chat(binding_store) -> str:
+        """The chat this machine is talking to, for modes that name no chat."""
+        binding = binding_store.load()
+        return str(getattr(binding, "chat_id", "") or "") if binding else ""
+
+
     confirm_store = confirm_store_from_env()
 
     if "--every" in args:
         if every is None:
             log("--every needs a number of minutes, e.g. --every 30")
             return EXIT_USAGE
-        return set_interval(settings_store_from_env(), every, confirm_store)
+        # Same rule as the page: a timer belongs to a chat. Falling back to the
+        # connected chat keeps the flag useful on a single-user laptop.
+        cycles = cycle_store_from_env()
+        return set_interval(cycles, every, connected_chat(store), now=utcnow())
     if "--serve" in args:
         return cmd_serve(config, tz, client, store, confirm_store=confirm_store)
     if "--interval" in args:
