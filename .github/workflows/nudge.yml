@@ -36,7 +36,9 @@ jobs:
       - name: Fetch secrets from Infisical
         uses: Infisical/secrets-action@d2e351f16c6ca20d17c85e6c992e04bdeb64e87d # v1.0.18
         with:
-          method: "universal-auth"
+          # The action spells this one "universal". "universal-auth" is
+          # rejected with "Invalid authentication method".
+          method: "universal"
           client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
           client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
           project-slug: ${{ vars.INFISICAL_PROJECT_SLUG }}
