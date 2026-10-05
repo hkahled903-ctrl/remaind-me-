@@ -27,12 +27,13 @@ Depends on `reminder`, and on nothing outside it.
 
 from __future__ import annotations
 
+import hmac
 import json
 import os
 import urllib.parse
 from datetime import datetime
 
-from reminder.commands import CONFIRMATION, port_from_env, stop_timer
+from reminder.commands import CONFIRMATION, cmd_interval, port_from_env, stop_timer
 from reminder.binding import store_from_env
 from reminder.commands import bot_username
 from reminder.confirm import confirm_store_from_env
@@ -108,6 +109,15 @@ def _dispatch(method, path, query, headers, body) -> tuple[int, object, str]:
     """One routing table, shared with `webapp` by construction."""
     flat = {k: v[0] for k, v in query.items()}
     if method == "GET":
+        if path == "/internal/interval-cron":
+            cron_secret = os.environ.get("CRON_SECRET", "").strip()
+            if not cron_secret:
+                return 503, {"error": "cron secret is not configured"}, "application/json"
+            authorization = headers.get("authorization", "")
+            if not hmac.compare_digest(authorization, f"Bearer {cron_secret}"):
+                return 403, {"error": "forbidden"}, "application/json"
+            cmd_interval(_CONFIG, _TZ, _CLIENT, _CYCLES)
+            return 200, {"ok": True}, "application/json"
         if path in ("/", "/index.html"):
             status, content_type, page = APP.page()
             return status, page, content_type

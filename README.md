@@ -293,10 +293,20 @@ Or pick it on the Connect page: the segmented control under the countdown. The
 countdown is computed on the server and ticks down from there, so a wrong client
 clock cannot make the page promise a time nobody calculated.
 
-Two workflows run side by side and this changes neither. The daily one keeps its
-`0 7 * * *` cron and still reads `reminder_time`. The new `interval-reminder.yml`
-is a **heartbeat**, firing every five minutes, and `cmd_interval` decides whether
-any particular beat belongs to a period that has not been served.
+The Production project is on Vercel Hobby, whose native Cron Jobs only support
+daily schedules. To check due cycles more closely, configure an external
+minute-capable scheduler to make an authenticated `GET` request to
+`https://<your-production-host>/internal/interval-cron` every minute. Add a random
+`CRON_SECRET` to Vercel's Production environment and configure the scheduler to
+send `Authorization: Bearer <the-same-secret>`. The route rejects requests when
+the secret is missing or incorrect and calls the existing `cmd_interval`
+scheduler when authorized.
+
+The GitHub `interval-reminder.yml` remains a five-minute fallback heartbeat. Both
+workers invoke the same due-cycle engine, whose Redis claim prevents duplicate
+sends if they overlap. A minute-capable external schedule means a reminder is
+normally picked up at the next minute tick after `due_at`, plus scheduler,
+function startup, and network latency; it is not a real-time guarantee.
 
 **Why not put the interval in the cron?** Because the cron cannot follow a setting
 you change on a page -- it is a file in git, and a runner reads whatever was last
@@ -315,18 +325,15 @@ binding: **Upstash when configured, a local file otherwise.**
 > durable disk on some other CI can opt out with `REMINDER_ALLOW_FILE_INTERVAL=1`.
 > `tests/test_audit.py` covers both branches.
 
-**What "every 30 minutes" honestly means.** GitHub will not run a cron finer than
-five minutes, and even that is only a request -- scheduled workflows queue and
-commonly start several minutes late. Treat the interval as approximate, not as a
-timer. If precision matters more than "roughly every half hour", a process that
-stays up (`cmd_loop`, or systemd/Task Scheduler) is the honest choice; a cron is
-not.
+**What "every 30 minutes" honestly means.** The external schedule checks once
+per minute, while the GitHub fallback checks every five minutes and can be
+queued. Treat the interval as approximate, not as a real-time timer.
 
 Periods are numbered from the Unix epoch, so a restart cannot open a fresh window
 and re-send. `set_interval` clears the marker when you change the interval.
 
-**Cost:** the heartbeat fires about 288 times a day. Each run is a few seconds.
-Widen the cron if that matters -- and then the smallest offered reminder with it.
+**Cost:** the external heartbeat invokes a function about 1,440 times a day; the
+GitHub fallback runs about 288 times a day. Each invocation is short.
 
 ---
 

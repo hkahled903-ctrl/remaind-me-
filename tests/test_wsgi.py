@@ -18,6 +18,7 @@ import threading
 import unittest
 import urllib.error
 import urllib.request
+from unittest import mock
 from pathlib import Path
 from wsgiref.simple_server import WSGIRequestHandler, make_server
 
@@ -59,9 +60,18 @@ class WsgiAppTest(unittest.TestCase):
         cls.server.server_close()
         cls.thread.join(timeout=5)
 
-    def get(self, path: str):
-        with urllib.request.urlopen(BASE + path, timeout=10) as response:
-            return response.status, response.headers.get("Content-Type", ""), response.read()
+    def get(self, path: str, authorization: str | None = None):
+        request = urllib.request.Request(BASE + path)
+        if authorization is not None:
+            request.add_header("Authorization", authorization)
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                return response.status, response.headers.get("Content-Type", ""), response.read()
+        except urllib.error.HTTPError as exc:
+            if authorization is None:
+                raise
+            with exc:
+                return exc.code, exc.headers.get("Content-Type", ""), exc.read()
 
     def post(self, path: str, body: bytes, secret: str | None = None):
         request = urllib.request.Request(BASE + path, data=body, method="POST")
@@ -164,6 +174,46 @@ class WsgiAppTest(unittest.TestCase):
         self.assertEqual(entry, "api/index.py")
         self.assertTrue((PROJECT_ROOT / entry).is_file())
         self.assertEqual(config["routes"][0]["dest"], entry)
+
+    def test_w9_interval_scheduler_uses_an_external_hobby_compatible_endpoint(self):
+        config = json.loads((PROJECT_ROOT / "vercel.json").read_text(encoding="utf-8"))
+        self.assertNotIn("crons", config, "Hobby rejects schedules more frequent than daily")
+        self.assertEqual(config["routes"][0]["dest"], "api/index.py")
+
+    def test_w10_interval_cron_requires_a_configured_secret(self):
+        with mock.patch.dict(os.environ, {"CRON_SECRET": ""}):
+            status, _, body = self.get(
+                "/internal/interval-cron", authorization="Bearer test-cron-secret"
+            )
+        self.assertEqual(status, 503)
+        self.assertEqual(json.loads(body)["error"], "cron secret is not configured")
+
+    def test_w11_interval_cron_rejects_an_invalid_authorization_header(self):
+        import index
+
+        with mock.patch.dict(os.environ, {"CRON_SECRET": "test-cron-secret"}):
+            with mock.patch.object(index, "cmd_interval") as run_worker:
+                status, _, body = self.get(
+                    "/internal/interval-cron", authorization="Bearer wrong"
+                )
+        self.assertEqual(status, 403)
+        self.assertEqual(json.loads(body)["error"], "forbidden")
+        run_worker.assert_not_called()
+
+    def test_w12_interval_cron_runs_the_existing_scheduler_when_authorized(self):
+        import index
+
+        with mock.patch.dict(os.environ, {"CRON_SECRET": "test-cron-secret"}):
+            with mock.patch.object(index, "cmd_interval", return_value=0) as run_worker:
+                status, _, body = self.get(
+                    "/internal/interval-cron",
+                    authorization="Bearer test-cron-secret",
+                )
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body), {"ok": True})
+        run_worker.assert_called_once_with(
+            index._CONFIG, index._TZ, index._CLIENT, index._CYCLES
+        )
 
 
 if __name__ == "__main__":
