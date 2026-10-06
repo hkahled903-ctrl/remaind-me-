@@ -90,13 +90,13 @@ def application(environ, start_response):
             status, result = TimerBot(store, telegram).handle_update(update)
             return _response(start_response, status, result)
 
+        signature = str(environ.get(QSTASH_SIGNATURE_HEADER, ""))
+        if not signature:
+            return _response(start_response, 403, {"error": "forbidden"})
         current_key = _env("QSTASH_CURRENT_SIGNING_KEY")
         next_key = _env("QSTASH_NEXT_SIGNING_KEY")
         if not current_key or not next_key:
             return _response(start_response, 503, {"error": "QStash signing keys are not configured"})
-        signature = str(environ.get(QSTASH_SIGNATURE_HEADER, ""))
-        if not signature:
-            return _response(start_response, 403, {"error": "forbidden"})
         try:
             Receiver(
                 current_signing_key=current_key,
