@@ -36,6 +36,18 @@ class DeploymentContractTest(unittest.TestCase):
         self.assertNotIn("qstash.upstash.io", scheduler)
         self.assertNotIn("create_schedule", scheduler)
 
+    def test_tick_uses_official_qstash_signature_verification(self):
+        api = (ROOT / "api" / "index.py").read_text(encoding="utf-8")
+        requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8")
+        example = (ROOT / ".env.example").read_text(encoding="utf-8")
+        self.assertIn("from qstash import Receiver", api)
+        self.assertIn("HTTP_UPSTASH_SIGNATURE", api)
+        self.assertIn("QSTASH_TICK_URL", api)
+        self.assertNotIn("TIMER_SCHEDULER_SECRET", api)
+        self.assertIn("qstash==3.4.0", requirements)
+        self.assertIn("QSTASH_CURRENT_SIGNING_KEY=", example)
+        self.assertIn("QSTASH_NEXT_SIGNING_KEY=", example)
+
     def test_runtime_has_no_legacy_product_imports(self):
         forbidden = (
             "reminder.binding", "reminder.commands", "reminder.confirm",

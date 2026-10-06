@@ -22,8 +22,8 @@ active is rejected. Duration input is a whole number from 1 to 1440 minutes.
   callbacks.
 - `reminder/scheduler.py` claims due timers, sends their Telegram messages, and
   records success or makes failures retryable.
-- `api/index.py` exposes the Telegram webhook and authenticated scheduler tick
-  as Vercel serverless routes.
+- `api/index.py` exposes the Telegram webhook and QStash-authenticated scheduler
+  tick as Vercel serverless routes.
 
 Redis keys:
 
@@ -57,7 +57,8 @@ retryable failure so they cannot race a claimed send.
 
 ### Required environment variables
 
-Configure these in Vercel and the Infisical environment used for webhook setup:
+Configure runtime values in Vercel Production. The Telegram bot token and webhook
+secret are also needed in the Infisical environment used by webhook registration:
 
 | Variable | Purpose |
 | --- | --- |
@@ -65,7 +66,8 @@ Configure these in Vercel and the Infisical environment used for webhook setup:
 | `WEBHOOK_SECRET` | Telegram webhook secret-token validation |
 | `UPSTASH_REDIS_REST_URL` | Upstash Redis REST endpoint |
 | `UPSTASH_REDIS_REST_TOKEN` | Upstash Redis access token |
-| `TIMER_SCHEDULER_SECRET` | Authorization for `/internal/tick` |
+| `QSTASH_CURRENT_SIGNING_KEY` | QStash request signature verification |
+| `QSTASH_NEXT_SIGNING_KEY` | QStash signing-key rotation verification |
 
 `LOG_LEVEL` is optional. Keep all credentials in environment/Infisical; never put
 values in this repository. `.env.example` lists names only.
@@ -84,17 +86,19 @@ Create exactly one recurring schedule in the Upstash QStash dashboard as a
 deployment/setup action—not from application code:
 
 - Method: `POST`
-- Destination: `https://<your-vercel-domain>/internal/tick`
+- Destination: `https://remaind-me-xi.vercel.app/internal/tick`
 - Cron: `* * * * *` (once per minute)
 - Body: `{}`
-- Forwarded header: `Authorization: Bearer <TIMER_SCHEDULER_SECRET>`
-  (configure as `Upstash-Forward-Authorization` if entering raw QStash headers)
 
-Set the same random scheduler secret in Vercel as `TIMER_SCHEDULER_SECRET`.
-After setup, verify there is only one QStash schedule targeting this endpoint.
-Do not create a schedule on deployment, webhook, or tick requests. Remove old
-QStash schedules and disable/delete the former GitHub interval and nudge
-workflows; only this one-minute QStash schedule should invoke the worker.
+Configure the current and next signing keys from the QStash console in Vercel.
+The endpoint verifies QStash's `Upstash-Signature` over the raw request body and
+the exact production destination URL using the official Python SDK. No forwarded
+Authorization header is required.
+
+Verify there is only one QStash schedule targeting this endpoint. Do not create
+a schedule on deployment, webhook, or tick requests. Remove old QStash schedules
+and disable/delete the former GitHub interval and nudge workflows; only this
+one-minute QStash schedule should invoke the worker.
 
 The tick endpoint queries `timers:due` through the current minute, and then each
 candidate is atomically rechecked and claimed in Redis. Each invocation handles
@@ -111,8 +115,8 @@ disposable Redis 7 service; tests do not use production credentials.
 
 ## Local tests
 
-Python 3.12+ is required; runtime and tests use the standard library. The unit
-and API tests run with:
+Python 3.12+ is required. Runtime dependencies are installed from
+`requirements.txt`. Run the unit and API tests with:
 
 ```powershell
 python -m unittest discover -s tests -t . -v
