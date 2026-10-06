@@ -59,14 +59,14 @@ jobs:
               raise SystemExit(f'Vercel webhook secret check failed with HTTP {exc.code}; secret was not logged') from None
           print('Vercel webhook secret check: HTTP 200; secret was not logged')"
 
-      # Reuses the app's own register_webhook -- the same call --serve makes.
-      # It sends message and callback_query updates and prints only the URL.
+      # Register the Telegram webhook explicitly; the application never registers
+      # it on a request or scheduler invocation.
       - name: Register the webhook
         run: |
           python -c "
           import os
           from reminder.transport import Telegram
-          from reminder.webapp import register_webhook
+          from reminder.bot import register_webhook
           register_webhook('https://remaind-me-xi.vercel.app', os.environ['WEBHOOK_SECRET'], Telegram(os.environ['TELEGRAM_BOT_TOKEN']))"
 
       # Confirm in the same run. getWebhookInfo never returns secret_token.

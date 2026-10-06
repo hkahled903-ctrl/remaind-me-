@@ -6,6 +6,7 @@ settings.json
 confirm.json
 __pycache__/
 *.pyc
+.pytest_cache/
 
 # Local secrets -- never commit real credentials
 .env
