@@ -60,6 +60,7 @@ else
     kind = 'expiration'
     redis.call('HSET', KEYS[1], 'state', state, 'confirmation_id', confirmation_id,
       'next_reminder_at', '')
+    current_confirmation_id = confirmation_id
   elseif state == 'WAITING_CONFIRMATION' then
     local next_reminder_at = tonumber(redis.call('HGET', KEYS[1], 'next_reminder_at') or '0')
     if next_reminder_at <= 0 or next_reminder_at > now then return {} end
@@ -67,7 +68,6 @@ else
   else
     return {}
   end
-  current_confirmation_id = confirmation_id
   current_delivery_id = delivery_id
   redis.call('HSET', KEYS[1], 'pending_delivery_kind', kind,
     'pending_delivery_id', delivery_id)
