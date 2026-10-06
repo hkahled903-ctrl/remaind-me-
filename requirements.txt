@@ -1,1 +1,1 @@
-qstash==3.4.0
+# No external runtime dependencies.

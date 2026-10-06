@@ -22,7 +22,7 @@ active is rejected. Duration input is a whole number from 1 to 1440 minutes.
   callbacks.
 - `reminder/scheduler.py` claims due timers, sends their Telegram messages, and
   records success or makes failures retryable.
-- `api/index.py` exposes the Telegram webhook and QStash-authenticated scheduler
+- `api/index.py` exposes the Telegram webhook and shared-secret-authenticated scheduler
   tick as Vercel serverless routes.
 
 Redis keys:
@@ -66,8 +66,7 @@ secret are also needed in the Infisical environment used by webhook registration
 | `WEBHOOK_SECRET` | Telegram webhook secret-token validation |
 | `UPSTASH_REDIS_REST_URL` | Upstash Redis REST endpoint |
 | `UPSTASH_REDIS_REST_TOKEN` | Upstash Redis access token |
-| `QSTASH_CURRENT_SIGNING_KEY` | QStash request signature verification |
-| `QSTASH_NEXT_SIGNING_KEY` | QStash signing-key rotation verification |
+| `TIMER_SCHEDULER_SECRET` | Random scheduler secret (at least 32 characters) |
 
 `LOG_LEVEL` is optional. Keep all credentials in environment/Infisical; never put
 values in this repository. `.env.example` lists names only.
@@ -82,18 +81,20 @@ Telegram. The webhook accepts only Telegram requests with the configured
 
 ### The one production scheduler
 
-Create exactly one recurring schedule in the Upstash QStash dashboard as a
-deployment/setup action—not from application code:
+Keep exactly one existing recurring schedule in the Upstash QStash dashboard as a
+deployment/setup concern—not from application code:
 
 - Method: `POST`
 - Destination: `https://remaind-me-xi.vercel.app/internal/tick`
 - Cron: `* * * * *` (once per minute)
 - Body: `{}`
+- Forwarded header: `Upstash-Forward-Authorization: Bearer <TIMER_SCHEDULER_SECRET>`
 
-Configure the current and next signing keys from the QStash console in Vercel.
-The endpoint verifies QStash's `Upstash-Signature` over the raw request body and
-the exact production destination URL using the official Python SDK. No forwarded
-Authorization header is required.
+Set the forwarded header value to the exact Production `TIMER_SCHEDULER_SECRET`
+as `Bearer <secret>`. The endpoint compares it in constant time with the
+configured secret and rejects missing or invalid credentials. Do not expose the
+secret in logs, repository files, or the schedule's public configuration view.
+Update the existing schedule; do not create a second one.
 
 Verify there is only one QStash schedule targeting this endpoint. Do not create
 a schedule on deployment, webhook, or tick requests. Remove old QStash schedules

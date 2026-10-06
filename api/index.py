@@ -8,9 +8,6 @@ import logging
 import os
 from urllib.parse import urlsplit
 
-from qstash import Receiver
-from qstash.errors import SignatureError
-
 from reminder.bot import TimerBot
 from reminder.scheduler import run_tick
 from reminder.storage import RedisError, TimerStore
@@ -19,8 +16,8 @@ from reminder.transport import Telegram
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO").upper())
 log = logging.getLogger("timerbot")
 TELEGRAM_SECRET_HEADER = "HTTP_X_TELEGRAM_BOT_API_SECRET_TOKEN"
-QSTASH_SIGNATURE_HEADER = "HTTP_UPSTASH_SIGNATURE"
-QSTASH_TICK_URL = "https://remaind-me-xi.vercel.app/internal/tick"
+AUTHORIZATION_HEADER = "HTTP_AUTHORIZATION"
+MIN_SCHEDULER_SECRET_LENGTH = 32
 
 
 def _env(name: str) -> str:
@@ -90,23 +87,12 @@ def application(environ, start_response):
             status, result = TimerBot(store, telegram).handle_update(update)
             return _response(start_response, status, result)
 
-        signature = str(environ.get(QSTASH_SIGNATURE_HEADER, ""))
-        if not signature:
-            return _response(start_response, 403, {"error": "forbidden"})
-        current_key = _env("QSTASH_CURRENT_SIGNING_KEY")
-        next_key = _env("QSTASH_NEXT_SIGNING_KEY")
-        if not current_key or not next_key:
-            return _response(start_response, 503, {"error": "QStash signing keys are not configured"})
-        try:
-            Receiver(
-                current_signing_key=current_key,
-                next_signing_key=next_key,
-            ).verify(
-                signature=signature,
-                body=body.decode("utf-8"),
-                url=QSTASH_TICK_URL,
-            )
-        except (SignatureError, UnicodeDecodeError):
+        scheduler_secret = _env("TIMER_SCHEDULER_SECRET")
+        if len(scheduler_secret) < MIN_SCHEDULER_SECRET_LENGTH:
+            return _response(start_response, 503, {"error": "scheduler secret is not configured"})
+        expected_authorization = f"Bearer {scheduler_secret}"
+        provided_authorization = str(environ.get(AUTHORIZATION_HEADER, ""))
+        if not hmac.compare_digest(provided_authorization, expected_authorization):
             return _response(start_response, 403, {"error": "forbidden"})
         store, telegram = _dependencies()
         result = run_tick(store, telegram)

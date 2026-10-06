@@ -1,21 +1,15 @@
 from __future__ import annotations
 
-import base64
-import hashlib
 import io
 import json
 import os
-import time
 import unittest
 from unittest import mock
-
-import jwt
 
 from api import index
 from reminder.storage import RedisError
 
-CURRENT_SIGNING_KEY = "unit-test-current-signing-key-long-enough"
-NEXT_SIGNING_KEY = "unit-test-next-signing-key-long-enough"
+SCHEDULER_SECRET = "unit-test-secret-" + ("x" * 40)
 
 
 class TelegramRecorder:
@@ -53,8 +47,7 @@ class ApiTest(unittest.TestCase):
             os.environ,
             {
                 "WEBHOOK_SECRET": "telegram-secret",
-                "QSTASH_CURRENT_SIGNING_KEY": CURRENT_SIGNING_KEY,
-                "QSTASH_NEXT_SIGNING_KEY": NEXT_SIGNING_KEY,
+                "TIMER_SCHEDULER_SECRET": SCHEDULER_SECRET,
                 "UPSTASH_REDIS_REST_URL": "https://redis.invalid",
                 "UPSTASH_REDIS_REST_TOKEN": "redis-token",
                 "TELEGRAM_BOT_TOKEN": "bot-token",
@@ -62,23 +55,6 @@ class ApiTest(unittest.TestCase):
         ):
             payload = b"".join(index.application(environ, start_response))
         return int(status_line[0].split()[0]), json.loads(payload), dict(response_headers)
-
-    @staticmethod
-    def qstash_signature(body=b"{}", url=None, key=CURRENT_SIGNING_KEY):
-        body_hash = base64.urlsafe_b64encode(hashlib.sha256(body).digest()).decode().rstrip("=")
-        now = int(time.time())
-        return jwt.encode(
-            {
-                "iss": "Upstash",
-                "sub": url or index.QSTASH_TICK_URL,
-                "body": body_hash,
-                "iat": now,
-                "nbf": now,
-                "exp": now + 300,
-            },
-            key,
-            algorithm="HS256",
-        )
 
     def test_webhook_rejects_missing_and_invalid_secret_before_storage(self):
         with mock.patch.object(index, "_dependencies", side_effect=AssertionError("not reached")):
@@ -121,60 +97,42 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(status, 503)
         self.assertIn("storage unavailable", body["error"])
 
-    def test_tick_requires_valid_qstash_signature_and_uses_one_worker(self):
+    def test_tick_accepts_valid_scheduler_secret_and_uses_one_worker(self):
         store, telegram = object(), object()
         with (
             mock.patch.object(index, "_dependencies", return_value=(store, telegram)),
-            mock.patch.object(index, "run_tick", return_value={"due": 2, "claimed": 1, "delivered": 1}) as tick,
+            mock.patch.object(
+                index, "run_tick",
+                return_value={"due": 2, "claimed": 1, "delivered": 1},
+            ) as tick,
         ):
-            status, _, _ = self.request(
-                "/internal/tick",
-                headers={"HTTP_UPSTASH_SIGNATURE": "invalid"},
-            )
-            self.assertEqual(status, 403)
             status, body, _ = self.request(
                 "/internal/tick",
-                headers={"HTTP_UPSTASH_SIGNATURE": self.qstash_signature()},
+                headers={"HTTP_AUTHORIZATION": "Bearer " + SCHEDULER_SECRET},
             )
         self.assertEqual(status, 200)
         self.assertEqual(body["delivered"], 1)
         tick.assert_called_once_with(store, telegram)
 
-    def test_tick_rejects_missing_qstash_signature_before_worker(self):
+    def test_tick_rejects_missing_or_invalid_scheduler_auth_before_worker(self):
         with (
             mock.patch.object(index, "_dependencies", side_effect=AssertionError("not reached")),
             mock.patch.object(index, "run_tick", side_effect=AssertionError("not reached")),
         ):
             status, body, _ = self.request("/internal/tick")
-        self.assertEqual(status, 403)
-        self.assertEqual(body, {"error": "forbidden"})
-
-    def test_tick_rejects_signature_for_different_body_or_url(self):
-        with (
-            mock.patch.object(index, "_dependencies", side_effect=AssertionError("not reached")),
-            mock.patch.object(index, "run_tick", side_effect=AssertionError("not reached")),
-        ):
+            self.assertEqual(status, 403)
+            self.assertEqual(body, {"error": "forbidden"})
             status, _, _ = self.request(
                 "/internal/tick",
-                body=b'{"other":true}',
-                headers={"HTTP_UPSTASH_SIGNATURE": self.qstash_signature(body=b"{}")},
+                headers={"HTTP_AUTHORIZATION": "Bearer wrong"},
             )
             self.assertEqual(status, 403)
-            status, _, _ = self.request(
-                "/internal/tick",
-                headers={
-                    "HTTP_UPSTASH_SIGNATURE": self.qstash_signature(
-                        url="https://attacker.example/internal/tick"
-                    )
-                },
-            )
-        self.assertEqual(status, 403)
 
     def test_tick_redis_failure_is_not_reported_as_empty_success(self):
         with mock.patch.object(index, "_dependencies", side_effect=RedisError("offline")):
             status, body, _ = self.request(
                 "/internal/tick",
-                headers={"HTTP_UPSTASH_SIGNATURE": self.qstash_signature()},
+                headers={"HTTP_AUTHORIZATION": "Bearer " + SCHEDULER_SECRET},
             )
         self.assertEqual(status, 503)
         self.assertIn("error", body)

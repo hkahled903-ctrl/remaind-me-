@@ -32,21 +32,24 @@ class DeploymentContractTest(unittest.TestCase):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         scheduler = (ROOT / "reminder" / "scheduler.py").read_text(encoding="utf-8")
         self.assertIn("`* * * * *`", readme)
-        self.assertIn("Create exactly one recurring schedule", readme)
+        self.assertIn("Keep exactly one existing recurring schedule", readme)
+        self.assertIn("Upstash-Forward-Authorization", readme)
         self.assertNotIn("qstash.upstash.io", scheduler)
         self.assertNotIn("create_schedule", scheduler)
 
-    def test_tick_uses_official_qstash_signature_verification(self):
+    def test_tick_uses_shared_secret_and_has_no_qstash_sdk_dependency(self):
         api = (ROOT / "api" / "index.py").read_text(encoding="utf-8")
         requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8")
         example = (ROOT / ".env.example").read_text(encoding="utf-8")
-        self.assertIn("from qstash import Receiver", api)
-        self.assertIn("HTTP_UPSTASH_SIGNATURE", api)
-        self.assertIn("QSTASH_TICK_URL", api)
-        self.assertNotIn("TIMER_SCHEDULER_SECRET", api)
-        self.assertIn("qstash==3.4.0", requirements)
-        self.assertIn("QSTASH_CURRENT_SIGNING_KEY=", example)
-        self.assertIn("QSTASH_NEXT_SIGNING_KEY=", example)
+        self.assertIn("HTTP_AUTHORIZATION", api)
+        self.assertIn("TIMER_SCHEDULER_SECRET", api)
+        self.assertIn("hmac.compare_digest", api)
+        self.assertNotIn("from qstash", api.lower())
+        self.assertNotIn("Receiver", api)
+        self.assertNotIn("qstash==", requirements.lower())
+        self.assertIn("TIMER_SCHEDULER_SECRET=", example)
+        self.assertNotIn("QSTASH_CURRENT_SIGNING_KEY=", example)
+        self.assertNotIn("QSTASH_NEXT_SIGNING_KEY=", example)
 
     def test_runtime_has_no_legacy_product_imports(self):
         forbidden = (
