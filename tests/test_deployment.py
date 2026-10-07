@@ -42,6 +42,7 @@ class DeploymentContractTest(unittest.TestCase):
         requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8")
         example = (ROOT / ".env.example").read_text(encoding="utf-8")
         self.assertIn("HTTP_AUTHORIZATION", api)
+        self.assertIn("HTTP_UPSTASH_FORWARD_AUTHORIZATION", api)
         self.assertIn("TIMER_SCHEDULER_SECRET", api)
         self.assertIn("hmac.compare_digest", api)
         self.assertNotIn("from qstash", api.lower())

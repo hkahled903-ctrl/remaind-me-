@@ -17,6 +17,7 @@ logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO").upper())
 log = logging.getLogger("timerbot")
 TELEGRAM_SECRET_HEADER = "HTTP_X_TELEGRAM_BOT_API_SECRET_TOKEN"
 AUTHORIZATION_HEADER = "HTTP_AUTHORIZATION"
+QSTASH_FORWARD_AUTHORIZATION_HEADER = "HTTP_UPSTASH_FORWARD_AUTHORIZATION"
 MIN_SCHEDULER_SECRET_LENGTH = 32
 
 
@@ -91,8 +92,12 @@ def application(environ, start_response):
         if len(scheduler_secret) < MIN_SCHEDULER_SECRET_LENGTH:
             return _response(start_response, 503, {"error": "scheduler secret is not configured"})
         expected_authorization = f"Bearer {scheduler_secret}"
-        provided_authorization = str(environ.get(AUTHORIZATION_HEADER, ""))
-        if not hmac.compare_digest(provided_authorization, expected_authorization):
+        authorization = str(environ.get(AUTHORIZATION_HEADER, ""))
+        forwarded_authorization = str(environ.get(QSTASH_FORWARD_AUTHORIZATION_HEADER, ""))
+        authorized = hmac.compare_digest(authorization, expected_authorization) | hmac.compare_digest(
+            forwarded_authorization, expected_authorization
+        )
+        if not authorized:
             return _response(start_response, 403, {"error": "forbidden"})
         store, telegram = _dependencies()
         result = run_tick(store, telegram)

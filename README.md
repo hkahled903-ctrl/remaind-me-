@@ -91,10 +91,11 @@ deployment/setup concern—not from application code:
 - Forwarded header: `Upstash-Forward-Authorization: Bearer <TIMER_SCHEDULER_SECRET>`
 
 Set the forwarded header value to the exact Production `TIMER_SCHEDULER_SECRET`
-as `Bearer <secret>`. The endpoint compares it in constant time with the
-configured secret and rejects missing or invalid credentials. Do not expose the
-secret in logs, repository files, or the schedule's public configuration view.
-Update the existing schedule; do not create a second one.
+as `Bearer <secret>`. The handler validates the standard `Authorization` header
+or the `Upstash-Forward-Authorization` form when that header reaches the WSGI
+application with its QStash prefix intact. Both must match the configured
+secret. Do not expose the secret in logs or repository files. Update the
+existing schedule; do not create a second one.
 
 Verify there is only one QStash schedule targeting this endpoint. Do not create
 a schedule on deployment, webhook, or tick requests. Remove old QStash schedules

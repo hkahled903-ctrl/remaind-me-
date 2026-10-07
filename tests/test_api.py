@@ -114,6 +114,22 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(body["delivered"], 1)
         tick.assert_called_once_with(store, telegram)
 
+    def test_tick_accepts_qstash_forwarded_authorization_header(self):
+        store, telegram = object(), object()
+        with (
+            mock.patch.object(index, "_dependencies", return_value=(store, telegram)),
+            mock.patch.object(index, "run_tick", return_value={"due": 0, "claimed": 0, "delivered": 0}) as tick,
+        ):
+            status, body, _ = self.request(
+                "/internal/tick",
+                headers={
+                    "HTTP_UPSTASH_FORWARD_AUTHORIZATION": "Bearer " + SCHEDULER_SECRET,
+                },
+            )
+        self.assertEqual(status, 200)
+        self.assertTrue(body["ok"])
+        tick.assert_called_once_with(store, telegram)
+
     def test_tick_rejects_missing_or_invalid_scheduler_auth_before_worker(self):
         with (
             mock.patch.object(index, "_dependencies", side_effect=AssertionError("not reached")),
