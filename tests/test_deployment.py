@@ -12,6 +12,18 @@ class DeploymentContractTest(unittest.TestCase):
         config = json.loads((ROOT / "vercel.json").read_text(encoding="utf-8"))
         self.assertEqual(config["builds"][0]["src"], "api/index.py")
         self.assertEqual(config["routes"][0]["dest"], "api/index.py")
+        self.assertNotIn("functions", config)
+        self.assertTrue((ROOT / "api" / "website.html").is_file())
+
+    def test_website_entry_and_linking_routes_are_wired(self):
+        api = (ROOT / "api" / "index.py").read_text(encoding="utf-8")
+        website = (ROOT / "api" / "website.html").read_text(encoding="utf-8")
+        self.assertIn('path == "/"', api)
+        self.assertIn("/api/telegram/link-status", api)
+        self.assertIn("/api/timer/start", api)
+        self.assertIn("/api/timer/status", api)
+        self.assertIn("TELEGRAM_BOT_USERNAME", api)
+        self.assertIn("X-Website-Session", website)
 
     def test_only_ci_and_manual_webhook_registration_workflows_remain(self):
         workflows = sorted((ROOT / ".github" / "workflows").glob("*.yml"))

@@ -1,0 +1,485 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#e7eeeb">
+  <title>Daymark — a timer that follows you</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --mist: #e7eeeb;
+      --paper: #f8faf8;
+      --ink: #172e29;
+      --pine: #245247;
+      --quiet: #58716a;
+      --line: #c4d3cc;
+      --gold: #f0bd4f;
+      --danger: #9c3c36;
+      font-family: "Avenir Next", Avenir, "Segoe UI", sans-serif;
+      color: var(--ink);
+      background: var(--mist);
+    }
+
+    * { box-sizing: border-box; }
+    body { margin: 0; min-width: 320px; min-height: 100vh; }
+    button, a { font: inherit; }
+    button:focus-visible, a:focus-visible {
+      outline: 3px solid var(--gold);
+      outline-offset: 3px;
+    }
+
+    .page {
+      width: min(1100px, calc(100% - 48px));
+      min-height: 100vh;
+      margin: 0 auto;
+      padding: 28px 0 36px;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .topbar {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      color: var(--pine);
+      font-size: 15px;
+      font-weight: 700;
+      letter-spacing: .015em;
+    }
+
+    .mark { width: 30px; height: 30px; flex: none; }
+    main {
+      flex: 1;
+      display: grid;
+      grid-template-columns: minmax(240px, .85fr) minmax(360px, 1.15fr);
+      align-items: center;
+      gap: clamp(40px, 8vw, 112px);
+      padding: 76px 0 92px;
+    }
+
+    .intro { max-width: 390px; }
+    h1 {
+      margin: 0;
+      max-width: 9ch;
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: clamp(42px, 5.5vw, 68px);
+      font-weight: 400;
+      letter-spacing: -.055em;
+      line-height: .99;
+    }
+
+    .intro p {
+      max-width: 32ch;
+      margin: 24px 0 0;
+      color: var(--quiet);
+      font-size: 17px;
+      line-height: 1.65;
+    }
+
+    .workbench {
+      padding: clamp(24px, 4vw, 42px);
+      background: var(--paper);
+      border: 1px solid var(--line);
+      border-top: 5px solid var(--pine);
+      box-shadow: 12px 14px 0 rgba(36, 82, 71, .07);
+    }
+
+    .section-title {
+      margin: 0;
+      font-size: 17px;
+      font-weight: 650;
+    }
+
+    .duration-row {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 10px;
+      margin-top: 18px;
+    }
+
+    .duration {
+      min-height: 54px;
+      padding: 10px 8px;
+      color: var(--pine);
+      background: transparent;
+      border: 1px solid var(--line);
+      cursor: pointer;
+      font-size: 15px;
+      font-weight: 650;
+      transition: background-color 120ms ease, color 120ms ease, border-color 120ms ease;
+    }
+    .duration:hover { border-color: var(--pine); }
+    .duration[aria-pressed="true"] {
+      color: var(--paper);
+      background: var(--pine);
+      border-color: var(--pine);
+    }
+
+    .connect-row {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 14px;
+      min-height: 58px;
+      margin-top: 25px;
+    }
+
+    .primary, .secondary {
+      min-height: 50px;
+      padding: 0 20px;
+      border: 0;
+      cursor: pointer;
+      font-weight: 700;
+    }
+    .primary { color: var(--ink); background: var(--gold); }
+    .primary:hover:not(:disabled) { background: #e8ae36; }
+    .primary:disabled { cursor: not-allowed; opacity: .48; }
+    .secondary { color: var(--paper); background: var(--pine); }
+    .secondary:hover { background: #193e35; }
+    .secondary:disabled { cursor: not-allowed; opacity: .46; }
+    .secondary:disabled { cursor: not-allowed; opacity: .46; }
+
+    .connection {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--quiet);
+      font-size: 14px;
+    }
+    .connection[data-state="connected"] { color: var(--pine); font-weight: 700; }
+    .connection[data-state="error"] { color: var(--danger); }
+    .dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 50%;
+      background: #8b9b95;
+    }
+    .connection[data-state="connected"] .dot { background: #34805f; }
+
+    .timer-panel {
+      margin-top: 27px;
+      padding: 23px 0 0;
+      border-top: 1px solid var(--line);
+    }
+    .timer-panel[hidden] { display: none; }
+    .timer-caption { color: var(--quiet); font-size: 14px; }
+    .clock {
+      margin: 8px 0 4px;
+      color: var(--pine);
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: clamp(54px, 8vw, 78px);
+      font-variant-numeric: tabular-nums;
+      letter-spacing: -.045em;
+      line-height: 1;
+    }
+    .timer-state { margin: 0; color: var(--quiet); line-height: 1.5; }
+    .timer-actions { margin-top: 18px; }
+    .message {
+      min-height: 24px;
+      margin: 15px 0 0;
+      color: var(--quiet);
+      font-size: 14px;
+      line-height: 1.5;
+    }
+    .message[data-error="true"] { color: var(--danger); }
+
+    footer {
+      color: var(--quiet);
+      font-size: 13px;
+      line-height: 1.5;
+    }
+    footer span { color: var(--pine); font-weight: 650; }
+
+    @media (max-width: 740px) {
+      .page { width: min(560px, calc(100% - 36px)); padding-top: 20px; }
+      main {
+        grid-template-columns: 1fr;
+        gap: 34px;
+        align-content: center;
+        padding: 66px 0;
+      }
+      h1 { max-width: 12ch; font-size: clamp(42px, 12vw, 60px); }
+      .intro p { margin-top: 16px; }
+      .workbench { box-shadow: 7px 8px 0 rgba(36, 82, 71, .07); }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <header class="topbar">
+      <svg class="mark" viewBox="0 0 32 32" aria-hidden="true">
+        <path d="M16 2.5 28 9.3v13.4L16 29.5 4 22.7V9.3z" fill="none" stroke="#245247" stroke-width="2"/>
+        <path d="M16 8v8l5 3" fill="none" stroke="#245247" stroke-linecap="round" stroke-width="2"/>
+        <circle cx="16" cy="16" r="1.7" fill="#f0bd4f"/>
+      </svg>
+      <span>Daymark</span>
+    </header>
+
+    <main>
+      <section class="intro" aria-labelledby="headline">
+        <h1 id="headline">Make room for one focused stretch.</h1>
+        <p>Choose your time. We’ll keep the clock running, even when you close this page.</p>
+      </section>
+
+      <section class="workbench" aria-label="Timer controls">
+        <h2 class="section-title">How long would you like?</h2>
+        <div class="duration-row" role="group" aria-label="Timer duration">
+          <button class="duration" type="button" data-minutes="15" aria-pressed="true">15 minutes</button>
+          <button class="duration" type="button" data-minutes="30" aria-pressed="false">30 minutes</button>
+          <button class="duration" type="button" data-minutes="60" aria-pressed="false">1 hour</button>
+        </div>
+
+        <div class="connect-row">
+          <button id="connect" class="primary" type="button">Connect Telegram</button>
+          <a id="telegram-link" hidden target="_blank" rel="noopener">Open Telegram</a>
+          <div id="connection" class="connection" data-state="disconnected" role="status" aria-live="polite">
+            <span class="dot" aria-hidden="true"></span>
+            <span id="connection-text">Not connected</span>
+          </div>
+        </div>
+
+        <div id="timer-panel" class="timer-panel">
+          <div id="timer-caption" class="timer-caption">Your timer</div>
+          <div id="clock" class="clock" aria-live="off">15:00</div>
+          <p id="timer-state" class="timer-state">Ready when you are.</p>
+          <div class="timer-actions">
+            <button id="start" class="secondary" type="button" disabled>Start Timer</button>
+          </div>
+        </div>
+        <p id="message" class="message" role="status" aria-live="polite"></p>
+      </section>
+    </main>
+
+    <footer><span>Your timer keeps running.</span> Telegram lets you know when time is up.</footer>
+  </div>
+
+  <script>
+    (() => {
+      const key = "daymark.website-session";
+      const buttons = [...document.querySelectorAll(".duration")];
+      const connectButton = document.getElementById("connect");
+      const startButton = document.getElementById("start");
+      const connection = document.getElementById("connection");
+      const connectionText = document.getElementById("connection-text");
+      const timerPanel = document.getElementById("timer-panel");
+      const clock = document.getElementById("clock");
+      const timerState = document.getElementById("timer-state");
+      const message = document.getElementById("message");
+      let sessionId = localStorage.getItem(key);
+      let selectedMinutes = 15;
+      let timerExpiresAt = 0;
+      let serverClockOffsetMs = 0;
+      let timerRefresh;
+      let linkPoll;
+      let pollDeadline = 0;
+
+      const request = async (path, options = {}) => {
+        const headers = { ...(options.headers || {}) };
+        if (sessionId) headers["X-Website-Session"] = sessionId;
+        if (options.body) headers["Content-Type"] = "application/json";
+        const response = await fetch(path, { ...options, headers, cache: "no-store" });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || "The request could not be completed.");
+        return data;
+      };
+
+      const showMessage = (text = "", error = false) => {
+        message.textContent = text;
+        message.dataset.error = String(error);
+      };
+
+      const setConnection = (state, text) => {
+        connection.dataset.state = state;
+        connectionText.textContent = text;
+      };
+
+      const formatTime = seconds => {
+        const total = Math.max(0, Math.ceil(seconds));
+        return `${String(Math.floor(total / 60)).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}`;
+      };
+
+      const displayRemaining = () => {
+        if (timerExpiresAt) {
+          clock.textContent = formatTime(
+            (timerExpiresAt - Date.now() - serverClockOffsetMs) / 1000
+          );
+        }
+      };
+
+      const formatDuration = seconds => seconds % 3600 === 0
+        ? `${seconds / 3600} hour${seconds === 3600 ? "" : "s"}`
+        : `${seconds / 60} minutes`;
+
+      const refreshTimer = async () => {
+        try {
+          const timer = await request("/api/timer/status");
+          timerPanel.hidden = false;
+          startButton.disabled = timer.state !== "IDLE";
+          buttons.forEach(button => {
+            button.disabled = timer.state !== "IDLE";
+          });
+          if (timer.duration_seconds) {
+            selectedMinutes = timer.duration_seconds / 60;
+            buttons.forEach(button =>
+              button.setAttribute("aria-pressed", String(Number(button.dataset.minutes) === selectedMinutes))
+            );
+          }
+          if (timer.state === "RUNNING") {
+            serverClockOffsetMs = timer.server_now_ms - Date.now();
+            timerExpiresAt = timer.expires_at;
+            document.getElementById("timer-caption").textContent =
+              `${formatDuration(timer.duration_seconds)} timer`;
+            showMessage("");
+            timerState.textContent = timer.remaining_seconds > 0
+              ? "The timer is running. You can close this page."
+              : "Time is up. Your Telegram reminder is on its way.";
+            displayRemaining();
+          } else if (timer.state === "WAITING_CONFIRMATION") {
+            serverClockOffsetMs = timer.server_now_ms - Date.now();
+            timerExpiresAt = 0;
+            clock.textContent = "00:00";
+            document.getElementById("timer-caption").textContent =
+              `${formatDuration(timer.duration_seconds)} timer`;
+            timerState.textContent = "Waiting for your answer in Telegram.";
+            showMessage("Choose Yes or Give me more time in the Telegram message.");
+          } else {
+            timerExpiresAt = 0;
+            clock.textContent = formatTime(selectedMinutes * 60);
+            document.getElementById("timer-caption").textContent = "Your timer";
+            timerState.textContent = timer.started_at ? "Timer complete." : "Ready when you are.";
+          }
+        } catch (error) {
+          if (error.message.includes("connect Telegram")) {
+            startButton.disabled = true;
+            timerPanel.hidden = false;
+          } else {
+            showMessage(error.message, true);
+          }
+        }
+      };
+
+      const checkLink = async () => {
+        const status = await request("/api/telegram/link-status");
+        if (status.connected) {
+          window.clearInterval(linkPoll);
+          linkPoll = undefined;
+          setConnection("connected", "Telegram Connected");
+          connectButton.textContent = "Telegram Connected";
+          connectButton.disabled = true;
+          document.getElementById("telegram-link").hidden = true;
+          startButton.disabled = false;
+          showMessage("Connected. Your timer will be delivered in Telegram.");
+          await refreshTimer();
+          return true;
+        }
+        return false;
+      };
+
+      const pollLink = () => {
+        window.clearInterval(linkPoll);
+        pollDeadline = Date.now() + 3 * 60 * 1000;
+        linkPoll = window.setInterval(async () => {
+          if (Date.now() > pollDeadline) {
+            window.clearInterval(linkPoll);
+            linkPoll = undefined;
+            setConnection("disconnected", "Still waiting for Telegram");
+            connectButton.disabled = false;
+            connectButton.textContent = "Create a new link";
+            showMessage("Finish the connection in Telegram, or try again.");
+            return;
+          }
+          try {
+            await checkLink();
+          } catch (error) {
+            if (error.message.includes("expired")) {
+              window.clearInterval(linkPoll);
+              linkPoll = undefined;
+              localStorage.removeItem(key);
+              sessionId = null;
+              setConnection("disconnected", "Link expired");
+              connectButton.disabled = false;
+              connectButton.textContent = "Connect Telegram";
+              showMessage("That link expired. Connect Telegram again.", true);
+            }
+          }
+        }, 2000);
+      };
+
+      buttons.forEach(button => button.addEventListener("click", () => {
+        selectedMinutes = Number(button.dataset.minutes);
+        buttons.forEach(item => item.setAttribute("aria-pressed", String(item === button)));
+        if (!timerExpiresAt) clock.textContent = formatTime(selectedMinutes * 60);
+      }));
+
+      connectButton.addEventListener("click", async () => {
+        document.getElementById("telegram-link").hidden = true;
+        const telegramWindow = window.open("about:blank", "_blank");
+        if (telegramWindow) telegramWindow.opener = null;
+        connectButton.disabled = true;
+        showMessage("Preparing your private Telegram link…");
+        try {
+          const link = await request("/api/telegram/link", { method: "POST", body: "{}" });
+          sessionId = link.session_id;
+          localStorage.setItem(key, sessionId);
+          if (telegramWindow) telegramWindow.location.replace(link.telegram_url);
+          else {
+            const openLink = document.getElementById("telegram-link");
+            openLink.href = link.telegram_url;
+            openLink.hidden = false;
+          }
+          setConnection("pending", "Waiting for Telegram");
+          connectButton.textContent = "Create a new link";
+          connectButton.disabled = false;
+          showMessage("Send the message in Telegram, then return here.");
+          pollLink();
+        } catch (error) {
+          if (telegramWindow) telegramWindow.close();
+          connectButton.disabled = false;
+          showMessage(error.message, true);
+        }
+      });
+
+      startButton.addEventListener("click", async () => {
+        startButton.disabled = true;
+        showMessage("");
+        try {
+          await request("/api/timer/start", {
+            method: "POST",
+            body: JSON.stringify({ duration_minutes: selectedMinutes }),
+          });
+          await refreshTimer();
+        } catch (error) {
+          showMessage(error.message, true);
+          await refreshTimer();
+        }
+      });
+
+      const restore = async () => {
+        if (!sessionId) return;
+        try {
+          if (await checkLink()) {
+            if (!timerRefresh) timerRefresh = window.setInterval(refreshTimer, 12000);
+          } else {
+            setConnection("pending", "Waiting for Telegram");
+            connectButton.textContent = "Create a new link";
+            pollLink();
+          }
+        } catch (error) {
+          localStorage.removeItem(key);
+          sessionId = null;
+          setConnection("disconnected", "Not connected");
+          showMessage(error.message, true);
+        }
+      };
+
+      restore();
+      window.setInterval(displayRemaining, 1000);
+    })();
+  </script>
+</body>
+</html>

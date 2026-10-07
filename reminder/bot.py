@@ -29,6 +29,9 @@ class TimerBot:
             return 200, {"ok": True}
         text = str(message.get("text", "")).strip()
         command = text.split(maxsplit=1)[0].split("@", 1)[0] if text else ""
+        parts = text.split(maxsplit=1)
+        if command == "/start" and len(parts) == 2:
+            return self._website_link(chat_id, parts[1])
         if command == "/start" or command == "/help":
             self.telegram.send_message(
                 chat_id,
@@ -54,21 +57,41 @@ class TimerBot:
         except ValueError as exc:
             self.telegram.send_message(chat_id, str(exc))
             return 200, {"ok": True, "started": False}
-        moment = now_ms()
-        started = self.store.start(chat_id, duration_seconds, moment, new_id(), update_id)
-        if started == -1:
-            log.info("duplicate Telegram update ignored chat_id=%s update_id=%s", chat_id, update_id)
+        result = self.start_timer(chat_id, duration_seconds, update_id)
+        if result == "duplicate":
             return 200, {"ok": True, "started": False, "duplicate": True}
-        if started == 0:
+        if result == "active":
             self.telegram.send_message(
                 chat_id, "You already have a timer running. It must finish before starting another."
             )
             return 200, {"ok": True, "started": False}
+        return 200, {"ok": True, "started": True}
+
+    def start_timer(self, chat_id: str, duration_seconds: int, update_id: str = "") -> str:
+        moment = now_ms()
+        started = self.store.start(chat_id, duration_seconds, moment, new_id(), update_id)
+        if started == -1:
+            log.info("duplicate Telegram update ignored chat_id=%s update_id=%s", chat_id, update_id)
+            return "duplicate"
+        if started == 0:
+            return "active"
         log.info("timer started chat_id=%s duration_seconds=%s", chat_id, duration_seconds)
         self.telegram.send_message(
             chat_id, f"Timer started for {duration_seconds // 60} minutes."
         )
-        return 200, {"ok": True, "started": True}
+        return "started"
+
+    def _website_link(self, chat_id: str, link_token: str) -> tuple[int, dict]:
+        result = self.store.complete_website_link(link_token, chat_id)
+        if result in ("linked", "duplicate"):
+            self.telegram.send_message(
+                chat_id, "Telegram is connected. Return to the website to start your timer."
+            )
+        else:
+            self.telegram.send_message(
+                chat_id, "That website link is invalid or expired. Connect Telegram again."
+            )
+        return 200, {"ok": True}
 
     def _status(self, chat_id: str) -> tuple[int, dict]:
         timer = self.store.get(chat_id)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import time
 import unittest
 from datetime import datetime, timezone
 from unittest import mock
@@ -123,6 +124,71 @@ class TimerProductRedisTest(unittest.TestCase):
         self.assertEqual(timer["next_reminder_at"], "")
         self.assertFalse(self.store.start(CHAT, 900, DUE, new_id()))
         self.assertEqual(self.store.due_chats(DUE + 30 * MINUTE), [CHAT])
+
+    def test_website_link_is_pending_then_telegram_start_links_server_side_chat(self):
+        session_id, link_token = new_id(), new_id()
+        self.store.create_website_link(session_id, link_token)
+        self.assertEqual(self.store.get_website_session(session_id)["state"], "PENDING")
+
+        result = self.app.handle_update(
+            {
+                "message": {
+                    "chat": {"id": int(CHAT), "type": "private"},
+                    "text": f"/start {link_token}",
+                }
+            }
+        )
+        self.assertEqual(result[0], 200)
+        session = self.store.get_website_session(session_id)
+        self.assertEqual(session["state"], "LINKED")
+        self.assertEqual(session["chat_id"], CHAT)
+
+    def test_invalid_or_expired_website_link_token_is_rejected(self):
+        self.assertEqual(self.store.complete_website_link(new_id(), CHAT), "invalid")
+        session_id, link_token = new_id(), new_id()
+        self.store.create_website_link(session_id, link_token, ttl_seconds=1)
+        time.sleep(1.1)
+        self.assertEqual(self.store.complete_website_link(link_token, CHAT), "invalid")
+        self.assertIsNone(self.store.get_website_session(session_id))
+
+    def test_website_link_duplicate_is_safe_and_token_cannot_link_another_chat(self):
+        session_id, link_token = new_id(), new_id()
+        self.store.create_website_link(session_id, link_token)
+        update = {
+            "message": {
+                "chat": {"id": int(CHAT), "type": "private"},
+                "text": f"/start {link_token}",
+            }
+        }
+        self.assertEqual(self.app.handle_update(update)[0], 200)
+        self.assertEqual(self.app.handle_update(update)[0], 200)
+        self.assertEqual(self.store.complete_website_link(link_token, "654321"), "invalid")
+        self.assertEqual(self.store.get_website_session(session_id)["chat_id"], CHAT)
+
+    def test_concurrent_website_link_attempts_can_bind_only_one_chat(self):
+        session_id, link_token = new_id(), new_id()
+        self.store.create_website_link(session_id, link_token)
+        barrier = threading.Barrier(3)
+        results = []
+
+        def complete(chat_id):
+            barrier.wait()
+            results.append(self.store.complete_website_link(link_token, chat_id))
+
+        threads = [
+            threading.Thread(target=complete, args=(CHAT,)),
+            threading.Thread(target=complete, args=("654321",)),
+        ]
+        for thread in threads:
+            thread.start()
+        barrier.wait()
+        for thread in threads:
+            thread.join(timeout=5)
+        self.assertCountEqual(results, ["linked", "invalid"])
+        self.assertIn(
+            self.store.get_website_session(session_id)["chat_id"],
+            {CHAT, "654321"},
+        )
 
     def test_simultaneous_starts_create_only_one_active_timer(self):
         barrier = threading.Barrier(3)

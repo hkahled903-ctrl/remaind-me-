@@ -63,6 +63,7 @@ secret are also needed in the Infisical environment used by webhook registration
 | Variable | Purpose |
 | --- | --- |
 | `TELEGRAM_BOT_TOKEN` | Telegram Bot API access |
+| `TELEGRAM_BOT_USERNAME` | Public Telegram bot username used to build its deep link |
 | `WEBHOOK_SECRET` | Telegram webhook secret-token validation |
 | `UPSTASH_REDIS_REST_URL` | Upstash Redis REST endpoint |
 | `UPSTASH_REDIS_REST_TOKEN` | Upstash Redis access token |
@@ -78,6 +79,26 @@ Deploy the project to Vercel, then run the manually triggered
 and webhook secret through Infisical and registers `/telegram/webhook` with
 Telegram. The webhook accepts only Telegram requests with the configured
 `X-Telegram-Bot-Api-Secret-Token`.
+
+### Website and Telegram connection
+
+The website is served at `/`. It creates a random, single-use Telegram link token
+and a separate opaque website-session capability. Redis stores only SHA-256
+digests of those capabilities. Telegram `/start <token>` atomically binds that
+link attempt to the private chat; normal `/start` without a token keeps its help
+behavior. The browser never receives a Telegram chat ID.
+
+The website uses `POST /api/telegram/link`,
+`GET /api/telegram/link-status`, `POST /api/timer/start`, and
+`GET /api/timer/status`. The linked session, not request data, determines the
+chat for timer operations. Timer start calls the existing `TimerBot` and
+`TimerStore` paths. Refresh restores the displayed state from Redis timestamps;
+the browser countdown is presentation only. Link tokens expire after ten
+minutes, and an active website session expires after 30 days of inactivity.
+
+Set `TELEGRAM_BOT_USERNAME` in Vercel Production without an `@` prefix. Keep it
+aligned with `TELEGRAM_BOT_TOKEN`. The UI offers 15, 30, and 60 minutes. Vercel's
+Python build includes the website asset beside the WSGI entry point.
 
 ### The one production scheduler
 

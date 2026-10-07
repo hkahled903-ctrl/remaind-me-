@@ -2,11 +2,48 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import urllib.error
 import urllib.request
 
 TIMERS_KEY = "timers:due"
+LINK_TOKEN_TTL_SECONDS = 600
+LINKED_SESSION_TTL_SECONDS = 30 * 24 * 60 * 60
+
+CREATE_LINK_SESSION_SCRIPT = """
+if redis.call('EXISTS', KEYS[1]) == 1 or redis.call('EXISTS', KEYS[2]) == 1 then
+  return 0
+end
+redis.call('HSET', KEYS[1], 'state', 'PENDING')
+redis.call('EXPIRE', KEYS[1], ARGV[1])
+if not redis.call('SET', KEYS[2], ARGV[2], 'EX', ARGV[1], 'NX') then
+  redis.call('DEL', KEYS[1])
+  return 0
+end
+return 1
+"""
+
+COMPLETE_LINK_SESSION_SCRIPT = """
+local session_hash = redis.call('GET', KEYS[1])
+if session_hash then
+  local session_key = ARGV[2] .. session_hash
+  if redis.call('HGET', session_key, 'state') ~= 'PENDING' then return 0 end
+  redis.call('HSET', session_key, 'state', 'LINKED', 'chat_id', ARGV[1])
+  redis.call('EXPIRE', session_key, ARGV[3])
+  redis.call('DEL', KEYS[1])
+  redis.call('SET', KEYS[2], session_hash .. ':' .. ARGV[1], 'EX', ARGV[4])
+  return 1
+end
+local receipt = redis.call('GET', KEYS[2])
+if receipt then
+  local separator = string.find(receipt, ':', 1, true)
+  if separator and string.sub(receipt, separator + 1) == ARGV[1] then
+    return 2
+  end
+end
+return 0
+"""
 
 START_SCRIPT = """
 if redis.call('GET', KEYS[3]) then return -1 end
@@ -213,6 +250,69 @@ class TimerStore:
             ),
         )
         return int(result)
+
+    @staticmethod
+    def _website_session_key(session_id: str) -> str:
+        digest = hashlib.sha256(session_id.encode("utf-8")).hexdigest()
+        return f"website:session:{digest}"
+
+    @staticmethod
+    def _website_link_token_key(link_token: str) -> str:
+        digest = hashlib.sha256(link_token.encode("utf-8")).hexdigest()
+        return f"website:link:{digest}"
+
+    @staticmethod
+    def _website_link_receipt_key(link_token: str) -> str:
+        digest = hashlib.sha256(link_token.encode("utf-8")).hexdigest()
+        return f"website:link-used:{digest}"
+
+    def create_website_link(
+        self,
+        session_id: str,
+        link_token: str,
+        ttl_seconds: int = LINK_TOKEN_TTL_SECONDS,
+    ) -> None:
+        session_digest = hashlib.sha256(session_id.encode("utf-8")).hexdigest()
+        result = self._eval(
+            CREATE_LINK_SESSION_SCRIPT,
+            (
+                self._website_session_key(session_id),
+                self._website_link_token_key(link_token),
+            ),
+            (ttl_seconds, session_digest),
+        )
+        if result != 1:
+            raise RedisError("Could not create a unique website link session")
+
+    def complete_website_link(self, link_token: str, chat_id: str) -> str:
+        result = self._eval(
+            COMPLETE_LINK_SESSION_SCRIPT,
+            (
+                self._website_link_token_key(link_token),
+                self._website_link_receipt_key(link_token),
+            ),
+            (
+                chat_id,
+                "website:session:",
+                LINKED_SESSION_TTL_SECONDS,
+                LINK_TOKEN_TTL_SECONDS,
+            ),
+        )
+        return {1: "linked", 2: "duplicate"}.get(result, "invalid")
+
+    def get_website_session(self, session_id: str) -> dict[str, str] | None:
+        result = self.command("HGETALL", self._website_session_key(session_id))
+        if not result:
+            return None
+        if isinstance(result, dict):
+            session = {str(key): str(value) for key, value in result.items()}
+        elif isinstance(result, list) and len(result) % 2 == 0:
+            session = {str(result[i]): str(result[i + 1]) for i in range(0, len(result), 2)}
+        else:
+            raise RedisError("Redis returned malformed website-session data")
+        if session.get("state") == "LINKED":
+            self.command("EXPIRE", self._website_session_key(session_id), str(LINKED_SESSION_TTL_SECONDS))
+        return session
 
     def get(self, chat_id: str) -> dict[str, str] | None:
         result = self.command("HGETALL", self.key(chat_id))
